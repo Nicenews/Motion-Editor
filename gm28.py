@@ -4,7 +4,7 @@ from PyQt6.QtGui import QBrush, QPen, QColor, QPainterPath, QPainterPathStroker
 from PyQt6.QtWidgets import QApplication, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsScene, QGraphicsView, QMainWindow, QGraphicsItem
 
 # ============================================================
-# Math Utils
+# Math Utils2
 # ============================================================
 def distance(a, b): return math.hypot(b.x() - a.x(), b.y() - a.y())
 
