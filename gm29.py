@@ -45,7 +45,7 @@ class Line:
         self.id, Line._next_id = Line._next_id, Line._next_id + 1
         self.node_a, self.node_b = node_a, node_b
         self.rest_length = distance(node_a.position, node_b.position)
-        self.flexible = False  # R 규칙 등에 의해 길이가 변할 수 있는 선분인지 여부
+        self.flexible = False
         node_a.add_line(self), node_b.add_line(self)
 
 class AngleConstraint:
@@ -59,18 +59,12 @@ class AngleConstraint:
         self.target_angle = angle_between(self.center.position, self.node_a.position, self.node_b.position)
 
 class ReflectionConstraint:
-    """
-    R Rule: center(node2)를 중심으로 node1과 node3이 180도 반대 방향 대칭 이동
-    - 초기 거리를 최대 거리(max_dist)로 설정 (초과 불가)
-    - 양쪽 모두 길이 수축 가능 및 상대편 노드도 비례 수축
-    """
     _next_id = 1
     def __init__(self, center, node1, node3):
         self.id, ReflectionConstraint._next_id = ReflectionConstraint._next_id, ReflectionConstraint._next_id + 1
         self.center, self.node1, self.node3 = center, node1, node3
         self.enabled = True
         
-        # 최초 최대 거리 저장
         self.max_dist1 = distance(center.position, node1.position)
         self.max_dist3 = distance(center.position, node3.position)
         self.dist_ratio = self.max_dist3 / self.max_dist1 if self.max_dist1 > 1e-6 else 1.0
@@ -108,7 +102,6 @@ class ShapeModel:
             constraint = ReflectionConstraint(c, n1, n3)
             self.reflection_constraints.append(constraint)
             
-            # R 규칙이 적용된 노드 사이의 Line은 길이가 가변될 수 있도록 설정
             for line in self.lines:
                 if (line.node_a in (n1, n3) and line.node_b == c) or (line.node_b in (n1, n3) and line.node_a == c):
                     line.flexible = True
@@ -118,7 +111,7 @@ class ShapeModel:
             raise ValueError(f"지원하지 않는 Rule 타입입니다: {rule_type}")
 
 # ============================================================
-# Constraint Solver (v2.9)
+# Constraint Solver (v3.0 - 실시간 각도 동기화 개선)
 # ============================================================
 class ConstraintSolver:
     def __init__(self, model): 
@@ -126,33 +119,30 @@ class ConstraintSolver:
         self.active_drag_node = None
 
     def solve(self, iterations=60):
-        # 1. R 규칙 및 Line 길이 제약조건을 우선 해결[cite: 1]
-        for _ in range(iterations):
-            changed = False
-            for constraint in self.model.reflection_constraints:
-                if constraint.enabled and self.solve_reflection_constraint(constraint): 
-                    changed = True
-            for line in self.model.lines:
-                if not line.flexible and self.solve_line_length(line): 
-                    changed = True
-            if not changed: 
-                break
+        # 1. R 규칙 적용 (드래그 주체에 따라 반대편 노드 대칭 이동)
+        r_changed = False
+        for constraint in self.model.reflection_constraints:
+            if constraint.enabled and self.solve_reflection_constraint(constraint):
+                r_changed = True
 
-        # 2. R 규칙 적용으로 인해 노드 위치가 변한 경우, F 규칙의 Target Angle을 자동 업데이트[cite: 1]
-        if self.active_drag_node:
+        # 2. R 규칙으로 노드가 이동했거나 R 규칙 대상 노드를 드래그 중인 경우 F 규칙 각도 실시간 업데이트
+        if r_changed or self.active_drag_node:
             for f_constraint in self.model.angle_constraints:
                 f_constraint.update_target()
 
-        # 3. F 규칙 (각도 제약) 해결[cite: 1]
+        # 3. 일반 Line 길이 및 F 규칙 Solver 반복 수행
         for _ in range(iterations):
             changed = False
+            for line in self.model.lines:
+                if not line.flexible and self.solve_line_length(line): 
+                    changed = True
             for constraint in self.model.angle_constraints:
                 if constraint.enabled and self.solve_angle_constraint(constraint): 
                     changed = True
             if not changed: 
                 break
 
-        # 4. Solver 실행 후 가변 Line들의 rest_length 최신화[cite: 1]
+        # 4. 가변 Line들의 rest_length 최신화
         for line in self.model.lines:
             if line.flexible:
                 line.rest_length = distance(line.node_a.position, line.node_b.position)
@@ -198,48 +188,39 @@ class ConstraintSolver:
         c, n1, n3 = constraint.center, constraint.node1, constraint.node3
         changed = False
 
-        # 조건: 1번 또는 3번 노드가 직접 드래그의 '시작점(주체)'일 때만 R 규칙 계산 적용[cite: 1]
+        # Node 3 드래그 시 -> Node 1 대칭 이동
         if self.active_drag_node is n3:
             v3_x = n3.position.x() - c.position.x()
             v3_y = n3.position.y() - c.position.y()
             curr_dist3 = math.hypot(v3_x, v3_y)
             if curr_dist3 < 1e-6: return False
 
-            # Max Distance Clamping (3번 노드)[cite: 1]
             if curr_dist3 > constraint.max_dist3:
                 v3_x = (v3_x / curr_dist3) * constraint.max_dist3
                 v3_y = (v3_y / curr_dist3) * constraint.max_dist3
                 n3.set_position(QPointF(c.position.x() + v3_x, c.position.y() + v3_y))
                 changed = True
 
-            # Node 1 위치 대칭 및 비례 적용[cite: 1]
-            target_x = c.position.x() - v3_x / constraint.dist_ratio
-            target_y = c.position.y() - v3_y / constraint.dist_ratio
-            target_pos = QPointF(target_x, target_y)
-
-            if distance(n1.position, target_pos) > 1e-5:
+            target_pos = QPointF(c.position.x() - v3_x / constraint.dist_ratio, c.position.y() - v3_y / constraint.dist_ratio)
+            if distance(n1.position, target_pos) > 1e-4:
                 n1.set_position(target_pos)
                 changed = True
 
+        # Node 1 드래그 시 -> Node 3 대칭 이동
         elif self.active_drag_node is n1:
             v1_x = n1.position.x() - c.position.x()
             v1_y = n1.position.y() - c.position.y()
             curr_dist1 = math.hypot(v1_x, v1_y)
             if curr_dist1 < 1e-6: return False
 
-            # Max Distance Clamping (1번 노드)[cite: 1]
             if curr_dist1 > constraint.max_dist1:
                 v1_x = (v1_x / curr_dist1) * constraint.max_dist1
                 v1_y = (v1_y / curr_dist1) * constraint.max_dist1
                 n1.set_position(QPointF(c.position.x() + v1_x, c.position.y() + v1_y))
                 changed = True
 
-            # Node 3 위치 대칭 및 비례 적용[cite: 1]
-            target_x = c.position.x() - v1_x * constraint.dist_ratio
-            target_y = c.position.y() - v1_y * constraint.dist_ratio
-            target_pos = QPointF(target_x, target_y)
-
-            if distance(n3.position, target_pos) > 1e-5:
+            target_pos = QPointF(c.position.x() - v1_x * constraint.dist_ratio, c.position.y() - v1_y * constraint.dist_ratio)
+            if distance(n3.position, target_pos) > 1e-4:
                 n3.set_position(target_pos)
                 changed = True
 
@@ -254,7 +235,6 @@ class NodeItem(QGraphicsEllipseItem):
         super().__init__(-self.RADIUS, -self.RADIUS, self.RADIUS * 2, self.RADIUS * 2)
         self.editor, self.node, self.dragging = editor, node, False
         self.drag_start_scene, self.drag_start_position = QPointF(), QPointF()
-        self.disabled_constraints = []
         self.setBrush(QBrush(QColor("red") if node.fixed else QColor("white")))
         self.setPen(QPen(QColor("black"), 1))
         self.setZValue(1)
@@ -270,13 +250,6 @@ class NodeItem(QGraphicsEllipseItem):
         self.dragging = True
         self.editor.solver.active_drag_node = self.node
         self.drag_start_scene, self.drag_start_position = event.scenePos(), QPointF(self.node.position)
-        self.disabled_constraints.clear()
-
-        for constraint in self.editor.model.angle_constraints:
-            if constraint.enabled and (self.node is constraint.node_a or self.node is constraint.node_b or self.node is constraint.center):
-                constraint.enabled = False
-                self.disabled_constraints.append(constraint)
-
         self.setSelected(True)
         event.accept()
 
@@ -290,12 +263,6 @@ class NodeItem(QGraphicsEllipseItem):
         if event.button() != Qt.MouseButton.LeftButton or not self.dragging: return
         self.dragging = False
         self.editor.solver.active_drag_node = None
-
-        for constraint in self.disabled_constraints:
-            constraint.update_target()
-            constraint.enabled = True
-        self.disabled_constraints.clear()
-
         self.editor.solve_from_interaction()
         event.accept()
 
@@ -412,7 +379,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v2.9")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.0")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
