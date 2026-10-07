@@ -390,4 +390,59 @@ class ShapeEditor(QGraphicsView):
     def solve_from_interaction(self):
         if self.solver_updating: return
         self.solver_updating = True
-        try
+        try:
+            self.solver.solve()
+            self.update_graphics()
+        finally:
+            self.solver_updating = False
+
+    def update_graphics(self):
+        for node in self.model.nodes:
+            if item := self.node_items.get(node.id): item.update_from_model()
+        for line in self.model.lines:
+            if item := self.line_items.get(line.id): item.update_from_model()
+
+    def wheelEvent(self, event):
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(factor, factor)
+
+# ============================================================
+# Main Application
+# ============================================================
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v2.9")
+        self.resize(1000, 700)
+        self.editor = ShapeEditor()
+        self.setCentralWidget(self.editor)
+        self.create_demo()
+
+    def create_demo(self):
+        ed = self.editor
+
+        # 1. 노드 생성
+        ed.add_node(1, 200, 200)       # 조작 노드 1
+        ed.add_node(2, 350, 300, True) # 중심 고정 노드 2
+        ed.add_node(3, 500, 400)       # 조작 노드 3
+        ed.add_node(4, 250, 450)       # F 룰용 노드 4
+
+        # 2. 선분 생성
+        ed.add_line(1, 2)
+        ed.add_line(2, 3)
+        ed.add_line(2, 4)
+
+        # 3. Rule 적용
+        ed.add_rule('F', 1, 2, 4)
+        ed.add_rule('R', 1, 2, 3)
+
+        ed.update_graphics()
+
+def main():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
