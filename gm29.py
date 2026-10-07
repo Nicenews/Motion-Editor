@@ -45,7 +45,6 @@ class Line:
         self.id, Line._next_id = Line._next_id, Line._next_id + 1
         self.node_a, self.node_b = node_a, node_b
         self.rest_length = distance(node_a.position, node_b.position)
-        self.flexible = False
         node_a.add_line(self), node_b.add_line(self)
 
 class AngleConstraint:
@@ -54,9 +53,9 @@ class AngleConstraint:
         self.id, AngleConstraint._next_id = AngleConstraint._next_id, AngleConstraint._next_id + 1
         self.center, self.node_a, self.node_b = center, node_a, node_b
         self.target_angle = angle_between(center.position, node_a.position, node_b.position)
-        self.enabled = True
 
-    def update_target(self):
+    def store_current_angle(self):
+        """드래그 시작 시점에 원래 각도를 보존"""
         self.target_angle = angle_between(self.center.position, self.node_a.position, self.node_b.position)
 
 class ReflectionConstraint:
@@ -64,7 +63,6 @@ class ReflectionConstraint:
     def __init__(self, center, node1, node3):
         self.id, ReflectionConstraint._next_id = ReflectionConstraint._next_id, ReflectionConstraint._next_id + 1
         self.center, self.node1, self.node3 = center, node1, node3
-        self.enabled = True
 
 class ShapeModel:
     def __init__(self):
@@ -101,130 +99,91 @@ class ShapeModel:
             return constraint
 
 # ============================================================
-# Constraint Solver (v3.1 - 대칭 및 F 규칙 완벽 연동)
+# Constraint Solver (v3.2 - 폭주 완전 방지 및 구동 연동)
 # ============================================================
 class ConstraintSolver:
     def __init__(self, model): 
         self.model = model
         self.active_drag_node = None
-        self.last_drag_pos = None
 
-    def handle_drag_move(self, node, new_pos):
-        if self.last_drag_pos is None:
-            self.last_drag_pos = QPointF(node.position)
-        
-        delta = new_pos - self.last_drag_pos
-        
-        # [핵심 1] 2번(중심) 노드를 드래그할 경우: 대칭 노드(1,3번) 및 구동 노드를 함께 평행 이동
-        r_centers = [r.center for r in self.model.reflection_constraints]
-        if node in r_centers:
-            node.position = QPointF(new_pos)
-            for r in self.model.reflection_constraints:
-                if r.center is node:
-                    r.node1.position = r.node1.position + delta
-                    r.node3.position = r.node3.position + delta
-            for f in self.model.angle_constraints:
-                if f.center is node:
-                    # 중심이 이동할 때 다른 피연산 노드가 대칭 노드가 아닌 경우에도 평행 이동
-                  r_nodes = [r.node1 for r in self.model.reflection_constraints] + [r.node3 for r in self.model.reflection_constraints]
-                  if f.node_a not in r_nodes:
-                      f.node_a.position = f.node_a.position + delta
-                  if f.node_b not in r_nodes:
-                      f.node_b.position = f.node_b.position + delta
-                    
-            node.position = QPointF(new_pos)
+    def on_drag_start(self, node):
+        self.active_drag_node = node
+        # 드래그 시작 시점의 F 규칙 각도를 기억
+        for f in self.model.angle_constraints:
+            f.store_current_angle()
 
-        self.last_drag_pos = QPointF(new_pos)
-
-    def solve(self, iterations=30):
-        # 1. R 규칙 처리 (1번/3번 노드 드래그 시 대칭 동기화)
-        r_changed = False
-        for constraint in self.model.reflection_constraints:
-            if constraint.enabled and self.solve_reflection_constraint(constraint):
-                r_changed = True
-
-        # 2. 1번/3번 노드 드래그로 각도가 변했을 때만 F 규칙 target_angle 업데이트
-        if r_changed and self.active_drag_node not in [r.center for r in self.model.reflection_constraints]:
-            for f_constraint in self.model.angle_constraints:
-                f_constraint.update_target()
-
-        # 3. F 규칙 (각도 보정) 및 일반 Line 길이 보정
+    def solve(self, iterations=15):
         for _ in range(iterations):
-            changed = False
-            for constraint in self.model.angle_constraints:
-                if constraint.enabled and self.solve_angle_constraint(constraint): 
-                    changed = True
-            for line in self.model.lines:
-                if not line.flexible and self.solve_line_length(line): 
-                    changed = True
-            if not changed: 
-                break
+            # 1. R 대칭 규칙 동기화
+            self.solve_reflection_constraints()
+            # 2. F 각도 제약 연산
+            self.solve_angle_constraints()
+            # 3. Line 길이 유지 연산
+            self.solve_line_lengths()
 
-    def solve_reflection_constraint(self, constraint):
-        c, n1, n3 = constraint.center, constraint.node1, constraint.node3
-        changed = False
+    def solve_reflection_constraints(self):
+        for r in self.model.reflection_constraints:
+            c, n1, n3 = r.center, r.node1, r.node3
 
-        # Node 3 드래그 시 -> Node 1 대칭 이동 (현재 2-3 거리 및 반대 방향 유지)
-        if self.active_drag_node is n3:
-            v3 = n3.position - c.position
-            dist3 = math.hypot(v3.x(), v3.y())
-            if dist3 > 1e-6:
-                target_pos1 = c.position - v3
-                if distance(n1.position, target_pos1) > 1e-4:
-                    n1.position = target_pos1
-                    changed = True
+            # 3번 노드 드래그 시 -> 1번 노드가 2번(중심) 기준으로 반대편에 대칭 위치
+            if self.active_drag_node is n3:
+                v3 = n3.position - c.position
+                n1.set_position(c.position - v3)
 
-        # Node 1 드래그 시 -> Node 3 대칭 이동 (현재 2-1 거리 및 반대 방향 유지)
-        elif self.active_drag_node is n1:
-            v1 = n1.position - c.position
-            dist1 = math.hypot(v1.x(), v1.y())
-            if dist1 > 1e-6:
-                target_pos3 = c.position - v1
-                if distance(n3.position, target_pos3) > 1e-4:
-                    n3.position = target_pos3
-                    changed = True
+            # 1번 노드 드래그 시 -> 3번 노드가 2번(중심) 기준으로 반대편에 대칭 위치
+            elif self.active_drag_node is n1:
+                v1 = n1.position - c.position
+                n3.set_position(c.position - v1)
 
-        return changed
+            # 2번(중심) 노드 드래그 시 -> 1번과 3번 노드의 고유 상대 거리 및 방위 유지
+            elif self.active_drag_node is c:
+                pass # 중심 이동 시에는 1,3번이 원래 거리를 유지하며 자연스럽게 추종
 
-    def solve_angle_constraint(self, constraint):
-        c, a, b = constraint.center, constraint.node_a, constraint.node_b
-        
-        # 현재 각도와 목표 각도 차이
-        current_angle = angle_between(c.position, a.position, b.position)
-        error = normalize_angle(current_angle - constraint.target_angle)
-        if abs(error) < 1e-4: return False
+    def solve_angle_constraints(self):
+        for f in self.model.angle_constraints:
+            c, a, b = f.center, f.node_a, f.node_b
 
-        # 중심 노드가 드래그 중이 아니면 a, b 노드 회전 보정
-        w_a, w_b = a.inv_mass, b.inv_mass
-        w_sum = w_a + w_b
-        if w_sum == 0: return False
+            # 현재 형성된 각도와 목표 각도 차이 계산
+            curr_angle = angle_between(c.position, a.position, b.position)
+            diff = normalize_angle(curr_angle - f.target_angle)
 
-        corr_a = error * (w_a / w_sum)
-        corr_b = error * (w_b / w_sum)
+            if abs(diff) < 1e-4: continue
 
-        a.position = rotate_point(a.position, c.position, -corr_a)
-        b.position = rotate_point(b.position, c.position, corr_b)
-        return True
+            # 노드가 드래그 중인 주체이면 회전되지 않도록 반대편 노드만 회전 보정
+            if self.active_drag_node is a:
+                b.set_position(rotate_point(b.position, c.position, -diff))
+            elif self.active_drag_node is b:
+                a.set_position(rotate_point(a.position, c.position, diff))
+            else:
+                # 양쪽 다 드래그 중이 아니면 절반씩 나누어 회전
+                a.set_position(rotate_point(a.position, c.position, diff * 0.5))
+                b.set_position(rotate_point(b.position, c.position, -diff * 0.5))
 
-    def solve_line_length(self, line):
-        a, b = line.node_a, line.node_b
-        w_a, w_b = a.inv_mass, b.inv_mass
-        w_sum = w_a + w_b
-        if w_sum == 0: return False
+    def solve_line_lengths(self):
+        for line in self.model.lines:
+            a, b = line.node_a, line.node_b
+            if a.fixed and b.fixed: continue
 
-        dx, dy = b.position.x() - a.position.x(), b.position.y() - a.position.y()
-        current_length = math.hypot(dx, dy)
-        if current_length < 1e-6: return False
+            dx, dy = b.position.x() - a.position.x(), b.position.y() - a.position.y()
+            dist = math.hypot(dx, dy)
+            if dist < 1e-6: continue
 
-        error = current_length - line.rest_length
-        if abs(error) < 1e-4: return False
+            err = dist - line.rest_length
+            if abs(err) < 1e-4: continue
 
-        nx, ny = dx / current_length, dy / current_length
-        corr_a, corr_b = error * (w_a / w_sum), error * (w_b / w_sum)
-
-        a.set_position(QPointF(a.position.x() + nx * corr_a, a.position.y() + ny * corr_a))
-        b.set_position(QPointF(b.position.x() - nx * corr_b, b.position.y() - ny * corr_b))
-        return True
+            nx, ny = dx / dist, dy / dist
+            
+            # 드래그 중인 노드는 고정시키고 반대편 노드를 당김
+            if self.active_drag_node is a:
+                b.set_position(QPointF(b.position.x() - nx * err, b.position.y() - ny * err))
+            elif self.active_drag_node is b:
+                a.set_position(QPointF(a.position.x() + nx * err, a.position.y() + ny * err))
+            else:
+                w_a, w_b = a.inv_mass, b.inv_mass
+                w_sum = w_a + w_b
+                if w_sum == 0: continue
+                a.set_position(QPointF(a.position.x() + nx * err * (w_a / w_sum), a.position.y() + ny * err * (w_a / w_sum)))
+                b.set_position(QPointF(b.position.x() - nx * err * (w_b / w_sum), b.position.y() - ny * err * (w_b / w_sum)))
 
 # ============================================================
 # View Components
@@ -245,16 +204,16 @@ class NodeItem(QGraphicsEllipseItem):
         self.setBrush(QBrush(QColor("red") if self.node.fixed else QColor("white")))
 
     def mousePressEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton: return
+        if event.button() != Qt.MouseButton.LeftButton or self.node.fixed: return
         self.dragging = True
-        self.editor.solver.active_drag_node = self.node
-        self.editor.solver.last_drag_pos = event.scenePos()
+        self.editor.solver.on_drag_start(self.node)
         self.setSelected(True)
         event.accept()
 
     def mouseMoveEvent(self, event):
-        if not self.dragging: return
-        self.editor.solver.handle_drag_move(self.node, event.scenePos())
+        if not self.dragging or self.node.fixed: return
+        # 드래그 중인 노드 좌표만 정확히 마우스 위치로 업데이트 후 Solver 실행
+        self.node.position = QPointF(event.scenePos())
         self.editor.solve_from_interaction()
         event.accept()
 
@@ -262,7 +221,6 @@ class NodeItem(QGraphicsEllipseItem):
         if event.button() != Qt.MouseButton.LeftButton or not self.dragging: return
         self.dragging = False
         self.editor.solver.active_drag_node = None
-        self.editor.solver.last_drag_pos = None
         self.editor.solve_from_interaction()
         event.accept()
 
@@ -274,8 +232,7 @@ class NodeItem(QGraphicsEllipseItem):
 class LineItem(QGraphicsLineItem):
     def __init__(self, editor, line):
         super().__init__()
-        self.editor, self.line_model, self.dragging = editor, line, False
-        self.previous_scene_position = QPointF()
+        self.editor, self.line_model = editor, line
         self.setPen(QPen(QColor("black"), 2))
         self.setZValue(-1)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -356,7 +313,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.1")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.2")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
@@ -365,9 +322,9 @@ class MainWindow(QMainWindow):
     def create_demo(self):
         ed = self.editor
 
-        # 1. 노드 생성 (2번 노드 기본 fixed=False)
+        # 1. 노드 생성
         ed.add_node(1, 200, 200)       # 조작 노드 1
-        ed.add_node(2, 350, 300)       # 중심 노드 2 (이동 가능)
+        ed.add_node(2, 350, 300)       # 중심 노드 2
         ed.add_node(3, 500, 400)       # 조작 노드 3
         ed.add_node(4, 250, 450)       # F 룰 대상 노드 4
 
@@ -376,9 +333,9 @@ class MainWindow(QMainWindow):
         ed.add_line(2, 3)
         ed.add_line(2, 4)
 
-        # 3. Rule 적용
-        ed.add_rule('F', 1, 2, 4)      # 2번을 중심으로 1번과 4번 간 각도 제약 (F)
-        ed.add_rule('R', 1, 2, 3)      # 2번을 중심으로 1번과 3번 간 대칭 제약 (R)
+        # 3. Rule 적용 (F 규칙: 2번 중심 1, 4번 노드 간 각도 / R 규칙: 2번 중심 1, 3번 대칭)
+        ed.add_rule('F', 1, 2, 4)
+        ed.add_rule('R', 1, 2, 3)
 
         ed.update_graphics()
 
