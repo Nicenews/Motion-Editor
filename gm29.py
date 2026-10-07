@@ -126,11 +126,12 @@ class ConstraintSolver:
             for f in self.model.angle_constraints:
                 if f.center is node:
                     # 중심이 이동할 때 다른 피연산 노드가 대칭 노드가 아닌 경우에도 평행 이동
-                    if f.node_a not in [r.node1, r.node3 for r in self.model.reflection_constraints]:
-                        f.node_a.position = f.node_a.position + delta
-                    if f.node_b not in [r.node1, r.node3 for r in self.model.reflection_constraints]:
-                        f.node_b.position = f.node_b.position + delta
-        else:
+                  r_nodes = [r.node1 for r in self.model.reflection_constraints] + [r.node3 for r in self.model.reflection_constraints]
+                  if f.node_a not in r_nodes:
+                      f.node_a.position = f.node_a.position + delta
+                  if f.node_b not in r_nodes:
+                      f.node_b.position = f.node_b.position + delta
+                    
             node.position = QPointF(new_pos)
 
         self.last_drag_pos = QPointF(new_pos)
