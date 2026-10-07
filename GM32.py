@@ -180,7 +180,6 @@ class ConstraintSolver:
     def solve_angle_constraint(self, constraint):
         c, a, b = constraint.center, constraint.node_a, constraint.node_b
         
-        # [핵심 수정] 2번(중심)을 잡고 움직일 때 4번(b)을 기준(Weight 0)으로 고정하고, 1번(a)만 회전시킴
         w_a, w_b = self.weight(a), self.weight(b)
         if self.is_dragging(c):
             w_a, w_b = 1.0, 0.0
@@ -243,7 +242,6 @@ class ConstraintSolver:
                 n3.set_position(target_pos)
                 changed = True
 
-        # 2번(중심) 또는 4번 조작 시: F 규칙에 의해 회전된 1번 위치 기준 3번 대칭 이동
         else:
             target_pos = QPointF(c.position.x() - (n1.position.x() - c.position.x()) * constraint.dist_ratio,
                                  c.position.y() - (n1.position.y() - c.position.y()) * constraint.dist_ratio)
@@ -280,7 +278,6 @@ class NodeItem(QGraphicsEllipseItem):
         self.drag_start_scene, self.drag_start_position = event.scenePos(), QPointF(self.node.position)
         self.disabled_constraints.clear()
 
-        # 1번 또는 3번 노드를 끌 때만 F 규칙 비활성화 (드래그 종료 시 각도 새 목표값 저장)
         is_r_direct_node = False
         for rc in self.editor.model.reflection_constraints:
             if self.node is rc.node1 or self.node is rc.node3:
@@ -325,6 +322,7 @@ class LineItem(QGraphicsLineItem):
         super().__init__()
         self.editor, self.line_model, self.dragging = editor, line, False
         self.previous_scene_position = QPointF()
+        self.disabled_constraints = []
         self.setPen(QPen(QColor("black"), 2))
         self.setZValue(-1)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -347,6 +345,22 @@ class LineItem(QGraphicsLineItem):
         self.dragging, self.previous_scene_position = True, event.scenePos()
         self.editor.solver.active_drag_nodes.add(self.line_model.node_a)
         self.editor.solver.active_drag_nodes.add(self.line_model.node_b)
+        self.disabled_constraints.clear()
+
+        # [수정] 라인을 끌 때 R 규칙과 연관된 노드(1번, 3번)가 포함되어 있다면 F 규칙 임시 비활성화
+        line_nodes = {self.line_model.node_a, self.line_model.node_b}
+        is_r_line = False
+        for rc in self.editor.model.reflection_constraints:
+            if rc.node1 in line_nodes or rc.node3 in line_nodes:
+                is_r_line = True
+                break
+
+        if is_r_line:
+            for constraint in self.editor.model.angle_constraints:
+                if constraint.enabled:
+                    constraint.enabled = False
+                    self.disabled_constraints.append(constraint)
+
         self.setSelected(True)
         event.accept()
 
@@ -366,6 +380,13 @@ class LineItem(QGraphicsLineItem):
         self.dragging = False
         self.editor.solver.active_drag_nodes.discard(self.line_model.node_a)
         self.editor.solver.active_drag_nodes.discard(self.line_model.node_b)
+
+        # [수정] 라인 이동 후 최신 배치 상태로 F 규칙의 target_angle 갱신 및 재활성화
+        for constraint in self.disabled_constraints:
+            constraint.update_target()
+            constraint.enabled = True
+        self.disabled_constraints.clear()
+
         self.editor.update_graphics()
         self.editor.solve_from_interaction()
         event.accept()
@@ -433,7 +454,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.3")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.4")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
