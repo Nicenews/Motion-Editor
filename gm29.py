@@ -126,7 +126,7 @@ class ConstraintSolver:
         self.active_drag_node = None
 
     def solve(self, iterations=60):
-        # 1. R 규칙 및 Line 길이 제약조건을 우선 해결
+        # 1. R 규칙 및 Line 길이 제약조건을 우선 해결[cite: 1]
         for _ in range(iterations):
             changed = False
             for constraint in self.model.reflection_constraints:
@@ -138,12 +138,12 @@ class ConstraintSolver:
             if not changed: 
                 break
 
-        # 2. R 규칙 적용으로 인해 노드 위치가 변한 경우, F 규칙의 Target Angle을 자동 업데이트
+        # 2. R 규칙 적용으로 인해 노드 위치가 변한 경우, F 규칙의 Target Angle을 자동 업데이트[cite: 1]
         if self.active_drag_node:
             for f_constraint in self.model.angle_constraints:
                 f_constraint.update_target()
 
-        # 3. F 규칙 (각도 제약) 해결
+        # 3. F 규칙 (각도 제약) 해결[cite: 1]
         for _ in range(iterations):
             changed = False
             for constraint in self.model.angle_constraints:
@@ -152,7 +152,7 @@ class ConstraintSolver:
             if not changed: 
                 break
 
-        # 4. Solver 실행 후 가변 Line들의 rest_length 최신화
+        # 4. Solver 실행 후 가변 Line들의 rest_length 최신화[cite: 1]
         for line in self.model.lines:
             if line.flexible:
                 line.rest_length = distance(line.node_a.position, line.node_b.position)
@@ -198,21 +198,21 @@ class ConstraintSolver:
         c, n1, n3 = constraint.center, constraint.node1, constraint.node3
         changed = False
 
-        # 조건: 1번 또는 3번 노드가 직접 드래그의 '시작점(주체)'일 때만 R 규칙 계산 적용
+        # 조건: 1번 또는 3번 노드가 직접 드래그의 '시작점(주체)'일 때만 R 규칙 계산 적용[cite: 1]
         if self.active_drag_node is n3:
             v3_x = n3.position.x() - c.position.x()
             v3_y = n3.position.y() - c.position.y()
             curr_dist3 = math.hypot(v3_x, v3_y)
             if curr_dist3 < 1e-6: return False
 
-            # Max Distance Clamping (3번 노드)
+            # Max Distance Clamping (3번 노드)[cite: 1]
             if curr_dist3 > constraint.max_dist3:
                 v3_x = (v3_x / curr_dist3) * constraint.max_dist3
                 v3_y = (v3_y / curr_dist3) * constraint.max_dist3
                 n3.set_position(QPointF(c.position.x() + v3_x, c.position.y() + v3_y))
                 changed = True
 
-            # Node 1 위치 대칭 및 비례 적용
+            # Node 1 위치 대칭 및 비례 적용[cite: 1]
             target_x = c.position.x() - v3_x / constraint.dist_ratio
             target_y = c.position.y() - v3_y / constraint.dist_ratio
             target_pos = QPointF(target_x, target_y)
@@ -227,14 +227,14 @@ class ConstraintSolver:
             curr_dist1 = math.hypot(v1_x, v1_y)
             if curr_dist1 < 1e-6: return False
 
-            # Max Distance Clamping (1번 노드)
+            # Max Distance Clamping (1번 노드)[cite: 1]
             if curr_dist1 > constraint.max_dist1:
                 v1_x = (v1_x / curr_dist1) * constraint.max_dist1
                 v1_y = (v1_y / curr_dist1) * constraint.max_dist1
                 n1.set_position(QPointF(c.position.x() + v1_x, c.position.y() + v1_y))
                 changed = True
 
-            # Node 3 위치 대칭 및 비례 적용
+            # Node 3 위치 대칭 및 비례 적용[cite: 1]
             target_x = c.position.x() - v1_x * constraint.dist_ratio
             target_y = c.position.y() - v1_y * constraint.dist_ratio
             target_pos = QPointF(target_x, target_y)
@@ -390,59 +390,4 @@ class ShapeEditor(QGraphicsView):
     def solve_from_interaction(self):
         if self.solver_updating: return
         self.solver_updating = True
-        try:
-            self.solver.solve()
-            self.update_graphics()
-        finally:
-            self.solver_updating = False
-
-    def update_graphics(self):
-        for node in self.model.nodes:
-            if item := self.node_items.get(node.id): item.update_from_model()
-        for line in self.model.lines:
-            if item := self.line_items.get(line.id): item.update_from_model()
-
-    def wheelEvent(self, event):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
-
-# ============================================================
-# Main Application
-# ============================================================
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v2.9")
-        self.resize(1000, 700)
-        self.editor = ShapeEditor()
-        self.setCentralWidget(self.editor)
-        self.create_demo()
-
-    def create_demo(self):
-        ed = self.editor
-
-        # 1. 노드 생성
-        ed.add_node(1, 200, 200)       # 조작 노드 1
-        ed.add_node(2, 350, 300, True) # 중심 고정 노드 2
-        ed.add_node(3, 500, 400)       # 조작 노드 3
-        ed.add_node(4, 250, 450)       # F 룰용 노드 4
-
-        # 2. 선분 생성
-        ed.add_line(1, 2)
-        ed.add_line(2, 3)
-        ed.add_line(2, 4)
-
-        # 3. Rule 적용
-        ed.add_rule('F', 1, 2, 4)
-        ed.add_rule('R', 1, 2, 3)
-
-        ed.update_graphics()
-
-def main():
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
-
-if __name__ == "__main__":
-    main()
+        try
