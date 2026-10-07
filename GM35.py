@@ -1,4 +1,4 @@
-# GM-3.6
+# GM-3.7
 import sys, math
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QBrush, QPen, QColor, QPainterPath, QPainterPathStroker
@@ -105,7 +105,7 @@ class ShapeModel:
             raise ValueError(f"지원하지 않는 Rule 타입입니다: {rule_type}")
 
 # ============================================================
-# Constraint Solver (안정화 적용)
+# Constraint Solver (수렴 및 폭주 방지 재설계)
 # ============================================================
 class ConstraintSolver:
     def __init__(self, model):
@@ -119,31 +119,26 @@ class ConstraintSolver:
         if node.fixed or self.is_dragging(node): return 0.0
         return 1.0
 
-    def solve(self, iterations=15):
-        # 1. 고정 상태 제약 처리 (1번 고정 시 3번 이동 완전 금지)
-        for rc in self.model.reflection_constraints:
-            if rc.node1.fixed:
-                rc.node3.set_position(rc.node3.position)
-
+    def solve(self, iterations=10):
         for _ in range(iterations):
             changed = False
-            
-            # 선분 길이 해소
+
+            # 1. R 규칙 처리
+            for rc in self.model.reflection_constraints:
+                if rc.enabled and self.solve_reflection_constraint(rc):
+                    changed = True
+
+            # 2. 선분 길이 처리
             for line in self.model.lines:
-                if self.solve_line_length(line): changed = True
+                if self.solve_line_length(line):
+                    changed = True
 
-            # F 규칙 각도 해소
+            # 3. F 규칙 (각도) 처리
             for constraint in self.model.angle_constraints:
-                if constraint.enabled and self.solve_angle_constraint(constraint): changed = True
-
-            # R 규칙 해소 (상대 노드 고정 시 건너뜀)
-            for constraint in self.reflection_constraints_solve():
-                if constraint.enabled and self.solve_reflection_constraint(constraint): changed = True
+                if constraint.enabled and self.solve_angle_constraint(constraint):
+                    changed = True
 
             if not changed: break
-
-    def reflection_constraints_solve(self):
-        return [rc for rc in self.model.reflection_constraints if not (rc.node1.fixed or rc.node3.fixed)]
 
     def solve_line_length(self, line):
         a, b = line.node_a, line.node_b
@@ -155,11 +150,12 @@ class ConstraintSolver:
         if current_length < 1e-6: return False
 
         error = current_length - line.rest_length
-        if abs(error) < 1e-3: return False
+        if abs(error) < 1e-2: return False
 
         nx, ny = dx / current_length, dy / current_length
-        stiffness = 0.5  # 폭주 방지를 위해 감쇄 계수 조정
-        corr_a, corr_b = error * (w_a / (w_a + w_b)) * stiffness, error * (w_b / (w_a + w_b)) * stiffness
+        stiffness = 0.4  # 수렴 안정화를 위한 보정율
+        corr_a = error * (w_a / (w_a + w_b)) * stiffness
+        corr_b = error * (w_b / (w_a + w_b)) * stiffness
 
         a.set_position(QPointF(a.position.x() + nx * corr_a, a.position.y() + ny * corr_a))
         b.set_position(QPointF(b.position.x() - nx * corr_b, b.position.y() - ny * corr_b))
@@ -169,17 +165,18 @@ class ConstraintSolver:
         c, a, b = constraint.center, constraint.node_a, constraint.node_b
         
         w_a, w_b = self.weight(a), self.weight(b)
-        # 2번(c) 드래그 시 4번(b) 노드가 F 규칙을 따라 회전하도록 설정
-        if self.is_dragging(c):
+        
+        # 2번(c) 드래그 시 4번(b) 노드가 F 규칙을 따르도록 설정
+        if self.is_dragging(c) and not b.fixed:
             w_a, w_b = 0.0, 1.0
 
         if w_a + w_b == 0: return False
 
         curr_angle = angle_between(c.position, a.position, b.position)
         error = normalize_angle(curr_angle - constraint.target_angle)
-        if abs(error) < 1e-3: return False
+        if abs(error) < 1e-2: return False
 
-        stiffness = 0.5
+        stiffness = 0.3
         corr_a = error * (w_a / (w_a + w_b)) * stiffness
         corr_b = error * (w_b / (w_a + w_b)) * stiffness
 
@@ -189,10 +186,25 @@ class ConstraintSolver:
 
     def solve_reflection_constraint(self, constraint):
         c, n1, n3 = constraint.center, constraint.node1, constraint.node3
+        
+        # 1번 노드가 고정이고 상대 노드가 고정이 아닐 때는 3번 이동 금지
+        if n1.fixed and not n3.fixed:
+            return False
+
+        w3 = self.weight(n3)
+        if w3 == 0: return False
+
+        # 대칭 반사 목표 위치 계산
         target_pos = QPointF(c.position.x() - (n1.position.x() - c.position.x()) * constraint.dist_ratio,
                              c.position.y() - (n1.position.y() - c.position.y()) * constraint.dist_ratio)
-        if distance(n3.position, target_pos) > 1e-3:
-            n3.set_position(target_pos)
+        
+        diff_x = target_pos.x() - n3.position.x()
+        diff_y = target_pos.y() - n3.position.y()
+        
+        if math.hypot(diff_x, diff_y) > 1e-2:
+            stiffness = 0.4
+            n3.set_position(QPointF(n3.position.x() + diff_x * stiffness,
+                                    n3.position.y() + diff_y * stiffness))
             return True
         return False
 
@@ -219,7 +231,7 @@ class NodeItem(QGraphicsEllipseItem):
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton: return
 
-        # [규칙 1] 1번 노드가 고정이면 3번 노드 드래그 거부
+        # 1번 노드가 고정 상태일 때 3번 노드는 드래그 불가능
         for rc in self.editor.model.reflection_constraints:
             if self.node == rc.node3 and rc.node1.fixed:
                 event.ignore()
@@ -232,7 +244,7 @@ class NodeItem(QGraphicsEllipseItem):
         self.drag_start_scene, self.drag_start_position = event.scenePos(), QPointF(self.node.position)
         self.disabled_constraints.clear()
 
-        # [규칙 3] 4번 노드 드래그 시 F 규칙 임시 비활성화
+        # 4번 노드 조작 시 F 규칙 임시 비활성화 (Release 시 목표 각도 Update)
         if self.node.id == 4:
             for constraint in self.editor.model.angle_constraints:
                 if constraint.enabled:
@@ -244,24 +256,7 @@ class NodeItem(QGraphicsEllipseItem):
 
     def mouseMoveEvent(self, event):
         if not self.dragging or self.node.fixed: return
-        
-        target_pos = self.drag_start_position + (event.scenePos() - self.drag_start_scene)
-
-        # [핵심 폭주 방지 Fix] 2번 노드 드래그 시 1번 고정이면, 1번 중심 원형 궤적으로 미리 Clamping
-        if self.node.id == 2:
-            node1 = self.editor.model.nodes_by_id.get(1)
-            line12 = next((l for l in self.editor.model.lines if (l.node_a.id == 1 and l.node_b.id == 2) or (l.node_a.id == 2 and l.node_b.id == 1)), None)
-            if node1 and node1.fixed and line12:
-                dx = target_pos.x() - node1.position.x()
-                dy = target_pos.y() - node1.position.y()
-                curr_dist = math.hypot(dx, dy)
-                if curr_dist > 1e-6:
-                    target_pos = QPointF(
-                        node1.position.x() + (dx / curr_dist) * line12.rest_length,
-                        node1.position.y() + (dy / curr_dist) * line12.rest_length
-                    )
-
-        self.node.position = target_pos
+        self.node.position = self.drag_start_position + (event.scenePos() - self.drag_start_scene)
         self.editor.solve_from_interaction()
         event.accept()
 
@@ -270,7 +265,7 @@ class NodeItem(QGraphicsEllipseItem):
         self.dragging = False
         self.editor.solver.active_drag_nodes.discard(self.node)
 
-        # [규칙 3] 4번 노드 드래그 종료 후 F 규칙 각도 Update 및 재활성화
+        # 4번 노드 이동 종료 후 F 규칙 목표 각도 갱신
         for constraint in self.disabled_constraints:
             constraint.update_target()
             constraint.enabled = True
@@ -397,7 +392,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor GM-3.6")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor GM-3.7")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
@@ -406,18 +401,17 @@ class MainWindow(QMainWindow):
     def create_demo(self):
         ed = self.editor
 
-        # 1. 노드 생성 (1번 노드 기본 고정)
-        ed.add_node(1, 200, 200, fixed=True)  # 1번 노드 고정
-        ed.add_node(2, 350, 300)             # 중심 노드 2
-        ed.add_node(3, 500, 400)             # 조작 노드 3
-        ed.add_node(4, 250, 450)             # F 룰용 노드 4
+        # 노드 생성 (더블 클릭으로 고정/해제 전환 가능)
+        ed.add_node(1, 200, 200)
+        ed.add_node(2, 350, 300)
+        ed.add_node(3, 500, 400)
+        ed.add_node(4, 250, 450)
 
-        # 2. 선분 생성
+        # 선분 및 규칙 설정
         ed.add_line(1, 2)
         ed.add_line(2, 3)
         ed.add_line(2, 4)
 
-        # 3. Rule 적용
         ed.add_rule('F', 1, 2, 4)
         ed.add_rule('R', 1, 2, 3)
 
