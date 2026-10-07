@@ -129,7 +129,6 @@ class ConstraintSolver:
             drag_3 = self.is_dragging(rc.node3)
             start_is_r = drag_1 or drag_3
             
-            # 1 또는 3을 끌 때만 대칭 노드를 follower에 등록하고 선 길이를 가변으로 지정
             if drag_3 and rc.node1 not in self._followers: self._followers.append(rc.node1)
             elif drag_1 and rc.node3 not in self._followers: self._followers.append(rc.node3)
 
@@ -180,18 +179,28 @@ class ConstraintSolver:
 
     def solve_angle_constraint(self, constraint):
         c, a, b = constraint.center, constraint.node_a, constraint.node_b
+        
+        # [핵심 수정] 2번(중심)을 잡고 움직일 때 4번(b)을 기준(Weight 0)으로 고정하고, 1번(a)만 회전시킴
         w_a, w_b = self.weight(a), self.weight(b)
+        if self.is_dragging(c):
+            w_a, w_b = 1.0, 0.0
+
         w_sum = w_a + w_b
         if w_sum == 0: return False
 
-        error = normalize_angle(angle_between(c.position, a.position, b.position) - constraint.target_angle)
+        curr_angle = angle_between(c.position, a.position, b.position)
+        error = normalize_angle(curr_angle - constraint.target_angle)
         if abs(error) < 1e-4: return False
 
-        stiffness = 0.5
-        corr_a, corr_b = error * (w_a / w_sum) * stiffness, error * (w_b / w_sum) * stiffness
+        stiffness = 0.8
+        corr_a = error * (w_a / w_sum) * stiffness
+        corr_b = error * (w_b / w_sum) * stiffness
 
-        a.set_position(rotate_point(a.position, c.position, corr_a))
-        b.set_position(rotate_point(b.position, c.position, -corr_b))
+        if w_a > 0:
+            a.set_position(rotate_point(a.position, c.position, corr_a))
+        if w_b > 0:
+            b.set_position(rotate_point(b.position, c.position, -corr_b))
+            
         return True
 
     def solve_reflection_constraint(self, constraint):
@@ -234,7 +243,7 @@ class ConstraintSolver:
                 n3.set_position(target_pos)
                 changed = True
 
-        # 2번(중심) 또는 4번 조작 시: F 규칙에 따라 결정된 Node 1의 위치를 기준으로 Node 3을 180도 대칭 이동
+        # 2번(중심) 또는 4번 조작 시: F 규칙에 의해 회전된 1번 위치 기준 3번 대칭 이동
         else:
             target_pos = QPointF(c.position.x() - (n1.position.x() - c.position.x()) * constraint.dist_ratio,
                                  c.position.y() - (n1.position.y() - c.position.y()) * constraint.dist_ratio)
@@ -271,7 +280,7 @@ class NodeItem(QGraphicsEllipseItem):
         self.drag_start_scene, self.drag_start_position = event.scenePos(), QPointF(self.node.position)
         self.disabled_constraints.clear()
 
-        # 1번 또는 3번(R 규칙 직접 조작 노드)을 끌 때만 F 규칙을 끌어둔 후 마우스를 뗄 때 각도 갱신
+        # 1번 또는 3번 노드를 끌 때만 F 규칙 비활성화 (드래그 종료 시 각도 새 목표값 저장)
         is_r_direct_node = False
         for rc in self.editor.model.reflection_constraints:
             if self.node is rc.node1 or self.node is rc.node3:
@@ -298,7 +307,6 @@ class NodeItem(QGraphicsEllipseItem):
         self.dragging = False
         self.editor.solver.active_drag_nodes.discard(self.node)
 
-        # 1번/3번 노드 이동 후 F 규칙의 목표 각도 갱신 및 재활성화
         for constraint in self.disabled_constraints:
             constraint.update_target()
             constraint.enabled = True
@@ -425,7 +433,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.2")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.3")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
