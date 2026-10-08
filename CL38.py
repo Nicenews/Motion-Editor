@@ -1,4 +1,4 @@
-# CL-3.8
+# CL-3.9
 import sys, math
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QBrush, QPen, QColor, QPainterPath, QPainterPathStroker
@@ -208,6 +208,12 @@ class ConstraintSolver:
         if l1 is None or l2 is None: return None
         return anchor, tip, sign, l1.rest_length, l2.rest_length
 
+    def f_override(self, k, anchor):
+        """[규칙 3] 앵커(고정 끝)가 R 규칙의 1·3번 노드일 때만, 반대쪽 끝을 끌면 F를 무시하고 놓은 뒤 각도 Update.
+        R 규칙과 무관한 F는 항상 각도를 유지한다."""
+        return any(rc.enabled and rc.center is k.center and anchor in (rc.node1, rc.node3)
+                   for rc in self.model.reflection_constraints)
+
     def _solve_anchor_center_drag(self, k, anchor, tip, sign, l_ac, l_ct):
         """[규칙 2] 중심(2번) 드래그: 앵커(1번) 중심 원 위로 제한(1-2 길이 유지), 팁(4번)은 F 각도·길이 유지."""
         c = k.center
@@ -258,7 +264,7 @@ class ConstraintSolver:
             anchor, tip, sign, l_ac, l_ct = setup
             if self.is_dragging(c):
                 return self._solve_anchor_center_drag(constraint, anchor, tip, sign, l_ac, l_ct)
-            if self.is_dragging(tip):
+            if self.is_dragging(tip) and self.f_override(constraint, anchor):
                 return self._solve_anchor_tip_drag(constraint, anchor, tip, l_ac, l_ct)
 
         w_a, w_b = self.weight(a), self.weight(b)
@@ -415,7 +421,8 @@ class NodeItem(QGraphicsEllipseItem):
         self.retarget_constraints = [
             k for k in self.editor.model.angle_constraints
             if k.enabled and k.center is not self.node and
-            ((k.node_a.fixed and k.node_b is self.node) or (k.node_b.fixed and k.node_a is self.node))
+            ((k.node_a.fixed and k.node_b is self.node and self.editor.solver.f_override(k, k.node_a)) or
+             (k.node_b.fixed and k.node_a is self.node and self.editor.solver.f_override(k, k.node_b)))
         ]
 
         self.setSelected(True)
@@ -597,12 +604,55 @@ class ShapeEditor(QGraphicsView):
         return max((abs(distance(l.node_a.position, l.node_b.position) - l.rest_length)
                     for l in self.model.lines if l not in released), default=0.0)
 
+    def _constraint_error(self):
+        """선 길이 + F 각도 + R 대칭 오차 중 최대값 (px 단위)."""
+        err, s = self._line_error(), self.solver
+        for k in self.model.angle_constraints:
+            if not k.enabled: continue
+            setup = s._anchor_setup(k)
+            if setup and s.is_dragging(setup[1]) and s.f_override(k, setup[0]): continue   # [규칙 3] F 무시 중
+            c, a, b = k.center, k.node_a, k.node_b
+            e = abs(normalize_angle(angle_between(c.position, a.position, b.position) - k.target_angle))
+            err = max(err, e * max(distance(c.position, a.position), distance(c.position, b.position)))
+        for rc in self.model.reflection_constraints:
+            if not rc.enabled: continue
+            c, n1, n3 = rc.center, rc.node1, rc.node3
+            target = QPointF(c.position.x() - (n1.position.x() - c.position.x()) * rc.dist_ratio,
+                             c.position.y() - (n1.position.y() - c.position.y()) * rc.dist_ratio)
+            err = max(err, distance(n3.position, target))
+        return err
+
     def _settle(self, limit):
         self.solver.solve()
         for _ in range(3):
-            if self._line_error() <= limit: break
+            if self._constraint_error() <= limit: break
             self.solver.solve()
-        return self._line_error() <= limit
+        return self._constraint_error() <= limit
+
+    def _connected_nodes(self, start_nodes):
+        seen, stack = set(start_nodes), list(start_nodes)
+        while stack:
+            n = stack.pop()
+            for l in n.lines:
+                o = l.node_b if l.node_a is n else l.node_a
+                if o not in seen: seen.add(o), stack.append(o)
+        return seen
+
+    def _rotated_base(self, drag_nodes, targets):
+        """연결된 도형에 고정 노드가 정확히 1개면, 그 노드를 축으로 도형 전체를 회전해도 모든 규칙(선 길이·F·R)이 유지된다.
+        끄는 노드가 마우스 방향을 향하도록 회전한 상태를 돌려준다. (해당 없으면 None)"""
+        comp = self._connected_nodes(drag_nodes)
+        pivots = [n for n in comp if n.fixed]
+        if len(pivots) != 1: return None
+        pivot, d = pivots[0].position, drag_nodes[0]
+        good_pos = self._good[0]
+        gd, t = good_pos[d], targets[d]
+        if distance(gd, pivot) < 1e-6 or distance(t, pivot) < 1e-6: return None
+        phi = math.atan2(t.y() - pivot.y(), t.x() - pivot.x()) - math.atan2(gd.y() - pivot.y(), gd.x() - pivot.x())
+        pos = dict(good_pos)
+        for n in comp:
+            if not n.fixed: pos[n] = rotate_point(good_pos[n], pivot, phi)
+        return pos, self._good[1]
 
     def _solve_dragging(self, drag_nodes):
         targets = {n: QPointF(n.position) for n in drag_nodes}   # 마우스가 가리키는 위치
@@ -610,22 +660,28 @@ class ShapeEditor(QGraphicsView):
 
         self._restore_good()
         self.solver.prepare()
-        limit = max(self.LENGTH_TOL, self._line_error() * 1.05)
+        limit = max(self.LENGTH_TOL, self._constraint_error() * 1.05)
 
-        def trial(t):
-            self._restore_good()
+        def trial(base, t):
+            pos, rest = base
+            for n, p in pos.items(): n.position = QPointF(p)
+            for l, r in rest.items(): l.rest_length = r
             for n in drag_nodes:
-                g, tg = good_pos[n], targets[n]
+                g, tg = pos[n], targets[n]
                 n.position = QPointF(g.x() + (tg.x() - g.x()) * t, g.y() + (tg.y() - g.y()) * t)
             return self._settle(limit)
 
-        if not trial(1.0):
-            lo, hi = 0.0, 1.0       # 마지막 정상 상태(lo)와 마우스 위치(hi) 사이에서 갈 수 있는 곳까지만 이동
+        def approach(base):
+            lo, hi = 0.0, 1.0       # 기준 상태(lo)와 마우스 위치(hi) 사이에서 갈 수 있는 곳까지만 이동
             for _ in range(10):
                 mid = (lo + hi) / 2
-                if trial(mid): lo = mid
+                if trial(base, mid): lo = mid
                 else: hi = mid
-            trial(lo)
+            trial(base, lo)
+
+        if not trial(self._good, 1.0):
+            base = self._rotated_base(drag_nodes, targets)   # 고정 노드 1개가 축이면 마우스 방향으로 먼저 회전
+            approach(base if base is not None else self._good)
         self.snapshot_good()
 
     def solve_from_interaction(self):
@@ -658,7 +714,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.8")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.9")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
