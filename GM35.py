@@ -15,11 +15,6 @@ def normalize_angle(angle):
     while angle < -math.pi: angle += math.tau
     return angle
 
-def angle_between(center, a, b):
-    ang_a = math.atan2(a.y() - center.y(), a.x() - center.x())
-    ang_b = math.atan2(b.y() - center.y(), b.x() - center.x())
-    return normalize_angle(ang_b - ang_a)
-
 # ============================================================
 # Model Classes
 # ============================================================
@@ -29,10 +24,6 @@ class Node:
         self.position = QPointF(x, y)
         self.fixed = fixed
         self.lines = []
-
-    @property
-    def inv_mass(self): 
-        return 0.0 if self.fixed else 1.0
 
     def set_position(self, position):
         if not self.fixed: 
@@ -53,7 +44,6 @@ class Line:
         self.node_a = node_a
         self.node_b = node_b
         self.rest_length = distance(node_a.position, node_b.position)
-        self.max_length = self.rest_length  # 최대 길이 제한
         node_a.add_line(self)
         node_b.add_line(self)
 
@@ -62,23 +52,33 @@ class AngleConstraint:
     def __init__(self, center, node_a, node_b):
         self.id = AngleConstraint._next_id
         AngleConstraint._next_id += 1
-        self.center = center      # 2번 중심 노드
-        self.node_a = node_a      # 1번 기준 노드
-        self.node_b = node_b      # 4번 각도 종속 노드
-        self.update_target_angle()
+        self.center = center      # 2번 노드
+        self.node_a = node_a      # 1번 노드
+        self.node_b = node_b      # 3번 노드
+        self.update_target_state()
 
-    def update_target_angle(self):
-        """1번 노드 이동 완료 시 호출되어 각도를 새로 Update"""
-        self.target_angle = angle_between(self.center.position, self.node_a.position, self.node_b.position)
+    def update_target_state(self):
+        v_cb = self.node_b.position - self.center.position
+        ang_cb = math.atan2(v_cb.y(), v_cb.x())
+        v_ca = self.node_a.position - self.center.position
+        ang_ca = math.atan2(v_ca.y(), v_ca.x())
+        
+        self.rel_angle = normalize_angle(ang_ca - ang_cb)
+        self.target_dist = distance(self.center.position, self.node_a.position)
 
 class ReflectionConstraint:
     _next_id = 1
     def __init__(self, center, node1, node3):
         self.id = ReflectionConstraint._next_id
         ReflectionConstraint._next_id += 1
-        self.center = center
-        self.node1 = node1
-        self.node3 = node3
+        self.center = center    # 2번 노드
+        self.node1 = node1      # 1번 노드
+        self.node3 = node3      # 3번 노드
+        
+        # 최초 1-2번 대비 2-3번 라인의 길이 비율 계산 (Len(2-3) / Len(1-2))
+        len_12 = distance(center.position, node1.position)
+        len_23 = distance(center.position, node3.position)
+        self.ratio_3_over_1 = len_23 / len_12 if len_12 > 1e-6 else 1.0
 
 class ShapeModel:
     def __init__(self):
@@ -131,11 +131,9 @@ class ConstraintSolver:
         self.last_drag_pos = QPointF(start_pos)
 
     def on_drag_end(self):
-        """드래그 종료 시 1번 노드가 이동한 경우 F 규칙의 각도를 Update"""
         if self.active_drag_node:
             for f in self.model.angle_constraints:
-                if self.active_drag_node is f.node_a:
-                    f.update_target_angle()
+                f.update_target_state()
         self.active_drag_node = None
         self.last_drag_pos = None
 
@@ -143,118 +141,61 @@ class ConstraintSolver:
         if not self.active_drag_node or self.last_drag_pos is None:
             return
 
-        delta = new_pos - self.last_drag_pos
         node = self.active_drag_node
-
-        # 2번(중심) 노드를 드래그할 경우: 모든 연결 노드를 함께 평행 이동
-        r_centers = [r.center for r in self.model.reflection_constraints]
-        if node in r_centers:
-            node.set_position(new_pos)
-            moved_nodes = {node}
-            
-            for r in self.model.reflection_constraints:
-                if r.center is node:
-                    r.node1.set_position(r.node1.position + delta)
-                    r.node3.set_position(r.node3.position + delta)
-                    moved_nodes.update([r.node1, r.node3])
-
-            for f in self.model.angle_constraints:
-                if f.center is node:
-                    if f.node_a not in moved_nodes:
-                        f.node_a.set_position(f.node_a.position + delta)
-                        moved_nodes.add(f.node_a)
-                    if f.node_b not in moved_nodes:
-                        f.node_b.set_position(f.node_b.position + delta)
-                        moved_nodes.add(f.node_b)
-        else:
-            node.set_position(new_pos)
-
+        node.set_position(new_pos)
         self.last_drag_pos = QPointF(new_pos)
 
-    def solve(self, iterations=10):
+    def solve(self, iterations=5):
         for _ in range(iterations):
-            # 1) R 규칙 (대칭 및 최대 길이 구속 - 우선 적용)
             self.solve_reflection_constraints()
-            # 2) F 규칙 (고정 각도 연동)
             self.solve_angle_constraints()
-            # 3) 선분 길이 유지
-            self.solve_line_lengths()
 
     def solve_reflection_constraints(self):
-        """R 규칙: 대칭 이동 및 최대 길이 제한"""
+        """R 규칙: 최초 길이 비율(ratio_3_over_1)에 따른 각도 및 비율 대칭 반영"""
         for r in self.model.reflection_constraints:
             c, n1, n3 = r.center, r.node1, r.node3
 
-            # 최대 길이 범위 검사
-            for n in (n1, n3):
-                if self.active_drag_node is n:
-                    v = n.position - c.position
-                    dist = math.hypot(v.x(), v.y())
-                    max_len = None
-                    for line in self.model.lines:
-                        if (line.node_a is c and line.node_b is n) or (line.node_a is n and line.node_b is c):
-                            max_len = line.max_length
-                            break
-                    if max_len and dist > max_len:
-                        scale = max_len / dist
-                        n.set_position(c.position + v * scale)
-
-            # 2번 중심 노드 기준 대칭 위치 적용
-            if self.active_drag_node is n3:
-                v3 = n3.position - c.position
-                n1.set_position(c.position - v3)
-            else:
+            if self.active_drag_node is n1:
+                # 1번 노드가 이동: 1-2의 현재 방향과 길이에 초기 비율 반영하여 3번 위치 결정
                 v1 = n1.position - c.position
-                n3.set_position(c.position - v1)
+                len1 = math.hypot(v1.x(), v1.y())
+                if len1 < 1e-6: continue
+                
+                # 반대 방향 벡터 (-v1/len1) * (len1 * ratio)
+                dir_x, dir_y = -v1.x() / len1, -v1.y() / len1
+                target_len3 = len1 * r.ratio_3_over_1
+                
+                n3.set_position(QPointF(c.position.x() + dir_x * target_len3, 
+                                        c.position.y() + dir_y * target_len3))
+
+            elif self.active_drag_node is n3:
+                # 3번 노드가 이동: 2-3의 현재 방향과 길이에 역비율(1 / ratio) 반영하여 1번 위치 결정
+                v3 = n3.position - c.position
+                len3 = math.hypot(v3.x(), v3.y())
+                if len3 < 1e-6: continue
+
+                dir_x, dir_y = -v3.x() / len3, -v3.y() / len3
+                target_len1 = len3 / r.ratio_3_over_1 if r.ratio_3_over_1 > 1e-6 else len3
+
+                n1.set_position(QPointF(c.position.x() + dir_x * target_len1, 
+                                        c.position.y() + dir_y * target_len1))
 
     def solve_angle_constraints(self):
-        """F 규칙: 각도 고정 및 유지"""
+        """F 규칙: 2번 또는 3번 노드가 움직일 때 1번 노드를 지정된 위치/길이로 추종"""
         for f in self.model.angle_constraints:
             c, a, b = f.center, f.node_a, f.node_b
 
-            # 1번 노드 이동 중에는 각도 제약 무시
             if self.active_drag_node is a:
                 continue
 
-            base_angle = math.atan2(a.position.y() - c.position.y(), a.position.x() - c.position.x())
-            target_abs_angle = base_angle + f.target_angle
-            
-            line_len = 1.0
-            for l in self.model.lines:
-                if (l.node_a is c and l.node_b is b) or (l.node_a is b and l.node_b is c):
-                    line_len = l.rest_length
-                    break
+            if self.active_drag_node in (c, b):
+                v_cb = b.position - c.position
+                ang_cb = math.atan2(v_cb.y(), v_cb.x())
+                target_ang_a = ang_cb + f.rel_angle
 
-            if self.active_drag_node is not b:
-                new_b_x = c.position.x() + line_len * math.cos(target_abs_angle)
-                new_b_y = c.position.y() + line_len * math.sin(target_abs_angle)
-                b.set_position(QPointF(new_b_x, new_b_y))
-
-    def solve_line_lengths(self):
-        """기본 선분 길이 복원"""
-        for line in self.model.lines:
-            a, b = line.node_a, line.node_b
-            if a.fixed and b.fixed: continue
-
-            dx, dy = b.position.x() - a.position.x(), b.position.y() - a.position.y()
-            dist = math.hypot(dx, dy)
-            if dist < 1e-6: continue
-
-            err = dist - line.rest_length
-            if abs(err) < 1e-4: continue
-
-            nx, ny = dx / dist, dy / dist
-            
-            if self.active_drag_node is a:
-                b.set_position(QPointF(b.position.x() - nx * err, b.position.y() - ny * err))
-            elif self.active_drag_node is b:
-                a.set_position(QPointF(a.position.x() + nx * err, a.position.y() + ny * err))
-            else:
-                w_a, w_b = a.inv_mass, b.inv_mass
-                w_sum = w_a + w_b
-                if w_sum == 0: continue
-                a.set_position(QPointF(a.position.x() + nx * err * (w_a / w_sum), a.position.y() + ny * err * (w_a / w_sum)))
-                b.set_position(QPointF(b.position.x() - nx * err * (w_b / w_sum), b.position.y() - ny * err * (w_b / w_sum)))
+                new_a_x = c.position.x() + f.target_dist * math.cos(target_ang_a)
+                new_a_y = c.position.y() + f.target_dist * math.sin(target_ang_a)
+                a.set_position(QPointF(new_a_x, new_a_y))
 
 # ============================================================
 # View Components
@@ -396,20 +337,18 @@ class MainWindow(QMainWindow):
     def create_demo(self):
         ed = self.editor
 
-        # 노드 생성 (1: 기준 노드, 2: 중심 노드, 3: 대칭 노드, 4: 각도 추종 노드)
+        # 초기 배치 (1-2 거리: 약 180.28, 2-3 거리: 약 212.13 -> 비율 자동 계산 및 유지)
         ed.add_node(1, 200, 200)
         ed.add_node(2, 350, 300)
-        ed.add_node(3, 500, 400)
-        ed.add_node(4, 250, 450)
+        ed.add_node(3, 500, 450)
 
         # 선분 생성
         ed.add_line(1, 2)
         ed.add_line(2, 3)
-        ed.add_line(2, 4)
 
-        # 규칙 적용 (R: 1-2-3 대칭 고정 / F: 1-2-4 각도 고정)
+        # 규칙 적용
         ed.add_rule('R', 1, 2, 3)
-        ed.add_rule('F', 1, 2, 4)
+        ed.add_rule('F', 1, 2, 3)
 
         ed.update_graphics()
 
