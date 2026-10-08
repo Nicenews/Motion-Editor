@@ -1,4 +1,4 @@
-# CL-3.9
+# CL-4.0
 import sys, math
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QBrush, QPen, QColor, QPainterPath, QPainterPathStroker
@@ -208,12 +208,6 @@ class ConstraintSolver:
         if l1 is None or l2 is None: return None
         return anchor, tip, sign, l1.rest_length, l2.rest_length
 
-    def f_override(self, k, anchor):
-        """[규칙 3] 앵커(고정 끝)가 R 규칙의 1·3번 노드일 때만, 반대쪽 끝을 끌면 F를 무시하고 놓은 뒤 각도 Update.
-        R 규칙과 무관한 F는 항상 각도를 유지한다."""
-        return any(rc.enabled and rc.center is k.center and anchor in (rc.node1, rc.node3)
-                   for rc in self.model.reflection_constraints)
-
     def _solve_anchor_center_drag(self, k, anchor, tip, sign, l_ac, l_ct):
         """[규칙 2] 중심(2번) 드래그: 앵커(1번) 중심 원 위로 제한(1-2 길이 유지), 팁(4번)은 F 각도·길이 유지."""
         c = k.center
@@ -264,7 +258,7 @@ class ConstraintSolver:
             anchor, tip, sign, l_ac, l_ct = setup
             if self.is_dragging(c):
                 return self._solve_anchor_center_drag(constraint, anchor, tip, sign, l_ac, l_ct)
-            if self.is_dragging(tip) and self.f_override(constraint, anchor):
+            if self.is_dragging(tip):   # [규칙 3] 앵커가 고정이면 반대쪽 끝을 끌 때 F 무시
                 return self._solve_anchor_tip_drag(constraint, anchor, tip, l_ac, l_ct)
 
         w_a, w_b = self.weight(a), self.weight(b)
@@ -421,9 +415,15 @@ class NodeItem(QGraphicsEllipseItem):
         self.retarget_constraints = [
             k for k in self.editor.model.angle_constraints
             if k.enabled and k.center is not self.node and
-            ((k.node_a.fixed and k.node_b is self.node and self.editor.solver.f_override(k, k.node_a)) or
-             (k.node_b.fixed and k.node_a is self.node and self.editor.solver.f_override(k, k.node_b)))
+            ((k.node_a.fixed and k.node_b is self.node) or (k.node_b.fixed and k.node_a is self.node))
         ]
+
+        # [규칙 4] F 규칙의 1번 노드(첫 번째 노드)를 직접 끌면 고정각 해제 → 자유롭게 이동 → 놓은 뒤 고정각 Update
+        # (반대쪽 끝이 고정이면 위의 [규칙 3] 경로가 처리)
+        for k in self.editor.model.angle_constraints:
+            if k.enabled and k.node_a is self.node and not k.node_b.fixed:
+                k.enabled = False
+                self.disabled_constraints.append(k)
 
         self.setSelected(True)
         event.accept()
@@ -610,7 +610,7 @@ class ShapeEditor(QGraphicsView):
         for k in self.model.angle_constraints:
             if not k.enabled: continue
             setup = s._anchor_setup(k)
-            if setup and s.is_dragging(setup[1]) and s.f_override(k, setup[0]): continue   # [규칙 3] F 무시 중
+            if setup and s.is_dragging(setup[1]): continue   # [규칙 3] F 무시 중
             c, a, b = k.center, k.node_a, k.node_b
             e = abs(normalize_angle(angle_between(c.position, a.position, b.position) - k.target_angle))
             err = max(err, e * max(distance(c.position, a.position), distance(c.position, b.position)))
@@ -714,7 +714,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.9")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor v4.0")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
