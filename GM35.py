@@ -53,6 +53,7 @@ class Line:
         self.node_a = node_a
         self.node_b = node_b
         self.rest_length = distance(node_a.position, node_b.position)
+        self.max_length = self.rest_length  # 최대 길이 제한
         node_a.add_line(self)
         node_b.add_line(self)
 
@@ -64,7 +65,11 @@ class AngleConstraint:
         self.center = center      # 2번 중심 노드
         self.node_a = node_a      # 1번 기준 노드
         self.node_b = node_b      # 4번 각도 종속 노드
-        self.target_angle = angle_between(center.position, node_a.position, node_b.position)
+        self.update_target_angle()
+
+    def update_target_angle(self):
+        """1번 노드 이동 완료 시 호출되어 각도를 새로 Update"""
+        self.target_angle = angle_between(self.center.position, self.node_a.position, self.node_b.position)
 
 class ReflectionConstraint:
     _next_id = 1
@@ -101,19 +106,19 @@ class ShapeModel:
         rule_type = str(rule_type).upper()
         if rule_type == 'F':
             if len(node_ids) != 3: raise ValueError("F Rule은 3개의 노드 ID가 필요합니다.")
-            c, a, b = self.nodes_by_id[node_ids[1]], self.nodes_by_id[node_ids[0]], self.nodes_by_id[node_ids[2]]
+            a, c, b = self.nodes_by_id[node_ids[0]], self.nodes_by_id[node_ids[1]], self.nodes_by_id[node_ids[2]]
             constraint = AngleConstraint(c, a, b)
             self.angle_constraints.append(constraint)
             return constraint
         elif rule_type == 'R':
             if len(node_ids) != 3: raise ValueError("R Rule은 3개의 노드 ID가 필요합니다.")
-            c, n1, n3 = self.nodes_by_id[node_ids[1]], self.nodes_by_id[node_ids[0]], self.nodes_by_id[node_ids[2]]
-            constraint = ReflectionConstraint(c, n1, n3)
+            a, c, b = self.nodes_by_id[node_ids[0]], self.nodes_by_id[node_ids[1]], self.nodes_by_id[node_ids[2]]
+            constraint = ReflectionConstraint(c, a, b)
             self.reflection_constraints.append(constraint)
             return constraint
 
 # ============================================================
-# Constraint Solver (v3.5 - 충돌 제약 완전 해결 버전)
+# Constraint Solver
 # ============================================================
 class ConstraintSolver:
     def __init__(self, model): 
@@ -125,6 +130,15 @@ class ConstraintSolver:
         self.active_drag_node = node
         self.last_drag_pos = QPointF(start_pos)
 
+    def on_drag_end(self):
+        """드래그 종료 시 1번 노드가 이동한 경우 F 규칙의 각도를 Update"""
+        if self.active_drag_node:
+            for f in self.model.angle_constraints:
+                if self.active_drag_node is f.node_a:
+                    f.update_target_angle()
+        self.active_drag_node = None
+        self.last_drag_pos = None
+
     def handle_drag_move(self, new_pos):
         if not self.active_drag_node or self.last_drag_pos is None:
             return
@@ -132,7 +146,7 @@ class ConstraintSolver:
         delta = new_pos - self.last_drag_pos
         node = self.active_drag_node
 
-        # 2번(중심) 노드를 드래그할 경우: 모든 종속 노드 완벽 평행 이동
+        # 2번(중심) 노드를 드래그할 경우: 모든 연결 노드를 함께 평행 이동
         r_centers = [r.center for r in self.model.reflection_constraints]
         if node in r_centers:
             node.set_position(new_pos)
@@ -159,26 +173,48 @@ class ConstraintSolver:
 
     def solve(self, iterations=10):
         for _ in range(iterations):
+            # 1) R 규칙 (대칭 및 최대 길이 구속 - 우선 적용)
             self.solve_reflection_constraints()
+            # 2) F 규칙 (고정 각도 연동)
             self.solve_angle_constraints()
+            # 3) 선분 길이 유지
             self.solve_line_lengths()
 
     def solve_reflection_constraints(self):
+        """R 규칙: 대칭 이동 및 최대 길이 제한"""
         for r in self.model.reflection_constraints:
             c, n1, n3 = r.center, r.node1, r.node3
 
-            # 3번 노드 직접 드래그 시 -> 1번 노드가 2번(중심) 기준 대칭
+            # 최대 길이 범위 검사
+            for n in (n1, n3):
+                if self.active_drag_node is n:
+                    v = n.position - c.position
+                    dist = math.hypot(v.x(), v.y())
+                    max_len = None
+                    for line in self.model.lines:
+                        if (line.node_a is c and line.node_b is n) or (line.node_a is n and line.node_b is c):
+                            max_len = line.max_length
+                            break
+                    if max_len and dist > max_len:
+                        scale = max_len / dist
+                        n.set_position(c.position + v * scale)
+
+            # 2번 중심 노드 기준 대칭 위치 적용
             if self.active_drag_node is n3:
                 v3 = n3.position - c.position
                 n1.set_position(c.position - v3)
-            # 그 외 -> 3번 노드가 1번 노드의 대칭 위치로 보정
             else:
                 v1 = n1.position - c.position
                 n3.set_position(c.position - v1)
 
     def solve_angle_constraints(self):
+        """F 규칙: 각도 고정 및 유지"""
         for f in self.model.angle_constraints:
             c, a, b = f.center, f.node_a, f.node_b
+
+            # 1번 노드 이동 중에는 각도 제약 무시
+            if self.active_drag_node is a:
+                continue
 
             base_angle = math.atan2(a.position.y() - c.position.y(), a.position.x() - c.position.x())
             target_abs_angle = base_angle + f.target_angle
@@ -195,6 +231,7 @@ class ConstraintSolver:
                 b.set_position(QPointF(new_b_x, new_b_y))
 
     def solve_line_lengths(self):
+        """기본 선분 길이 복원"""
         for line in self.model.lines:
             a, b = line.node_a, line.node_b
             if a.fixed and b.fixed: continue
@@ -253,8 +290,7 @@ class NodeItem(QGraphicsEllipseItem):
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton or not self.dragging: return
         self.dragging = False
-        self.editor.solver.active_drag_node = None
-        self.editor.solver.last_drag_pos = None
+        self.editor.solver.on_drag_end()
         self.editor.solve_from_interaction()
         event.accept()
 
@@ -351,7 +387,7 @@ class ShapeEditor(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Node Line Constraint Editor v3.5")
+        self.setWindowTitle("PyQt6 Node Line Constraint Editor")
         self.resize(1000, 700)
         self.editor = ShapeEditor()
         self.setCentralWidget(self.editor)
@@ -371,9 +407,9 @@ class MainWindow(QMainWindow):
         ed.add_line(2, 3)
         ed.add_line(2, 4)
 
-        # 규칙 적용 (F: 1-2-4 각도 고정 / R: 1-2-3 대칭 고정)
-        ed.add_rule('F', 1, 2, 4)
+        # 규칙 적용 (R: 1-2-3 대칭 고정 / F: 1-2-4 각도 고정)
         ed.add_rule('R', 1, 2, 3)
+        ed.add_rule('F', 1, 2, 4)
 
         ed.update_graphics()
 
