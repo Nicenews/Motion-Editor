@@ -1,32 +1,42 @@
 import sys, math
-from PyQt6.QtCore import Qt, QPointF, QLineF
+from PyQt6.QtCore import Qt, QPointF, QLineF, QTimer
 from PyQt6.QtGui import QBrush, QPen, QColor
 from PyQt6.QtWidgets import (QApplication, QGraphicsEllipseItem, 
                              QGraphicsLineItem, QGraphicsScene, QGraphicsView)
 
-# ============================================================
-# Graphics Items
-# ============================================================
+
 class NodeItem(QGraphicsEllipseItem):
     RADIUS = 10
 
     def __init__(self, node_id, x, y):
         super().__init__(-self.RADIUS, -self.RADIUS, self.RADIUS * 2, self.RADIUS * 2)
         self.node_id = node_id
-        self.connected_lines = []
-        
+        self.pos = QPointF(x, y)
+        self.old_pos = QPointF(x, y)
+        self.is_pinned = False
+
         self.setBrush(QBrush(QColor("#4A90E2")))
         self.setPen(QPen(QColor("#1C3D5A"), 2))
         self.setPos(x, y)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsScenePositionChanges, True)
+        self.setZValue(1)
 
-    def itemChange(self, change, value):
-        if change == QGraphicsItem.GraphicsItemChange.ItemScenePositionHasChanged:
-            scene = self.scene()
-            if scene and getattr(scene, 'is_dragging', False):
-                scene.on_node_moved(self)
-        return super().itemChange(change, value)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_pinned = True
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.is_pinned:
+            new_pos = event.scenePos()
+            self.pos = new_pos
+            self.old_pos = new_pos
+            self.setPos(new_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_pinned = False
+            event.accept()
 
 
 class LineItem(QGraphicsLineItem):
@@ -35,105 +45,103 @@ class LineItem(QGraphicsLineItem):
         self.node_a = node_a
         self.node_b = node_b
         
-        # 초기 고유 길이 저장
-        pos_a, pos_b = node_a.scenePos(), node_b.scenePos()
-        self.rest_length = math.hypot(pos_b.x() - pos_a.x(), pos_b.y() - pos_a.y())
-
-        node_a.connected_lines.append(self)
-        node_b.connected_lines.append(self)
+        dx = node_b.pos.x() - node_a.pos.x()
+        dy = node_b.pos.y() - node_a.pos.y()
+        self.rest_length = math.hypot(dx, dy)
 
         self.setPen(QPen(QColor("#333333"), 2))
         self.setZValue(-1)
         self.update_position()
 
     def update_position(self):
-        self.setLine(QLineF(self.node_a.scenePos(), self.node_b.scenePos()))
+        self.setLine(QLineF(self.node_a.pos, self.node_b.pos))
 
 
-# ============================================================
-# Scene & View
-# ============================================================
 class NodeScene(QGraphicsScene):
     def __init__(self):
         super().__init__()
         self.setSceneRect(0, 0, 800, 600)
-        self.is_dragging = False
+        self.nodes = []
+        self.lines = []
 
-    def mousePressEvent(self, event):
-        self.is_dragging = True
-        super().mousePressEvent(event)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_physics)
+        self.timer.start(16)
 
-    def mouseReleaseEvent(self, event):
-        self.is_dragging = False
-        super().mouseReleaseEvent(event)
+    def add_node(self, node_id, x, y):
+        node = NodeItem(node_id, x, y)
+        self.nodes.append(node)
+        self.addItem(node)
+        return node
 
-    def on_node_moved(self, moved_node):
-        """PBD (Position Based Dynamics) 방식을 활용한 다중 제약조건 수렴 연산"""
-        all_lines = [item for item in self.items() if isinstance(item, LineItem)]
+    def add_line(self, node_a, node_b):
+        line = LineItem(node_a, node_b)
+        self.lines.append(line)
+        self.addItem(line)
+        return line
 
-        # iterations 횟수가 높을수록 단단한(Rigid) 변형체가 됩니다. (10~20회 권장)
-        iterations = 15
-        
-        for _ in range(iterations):
-            for line in all_lines:
-                node_a, node_b = line.node_a, line.node_b
+    def update_physics(self):
+        friction = 0.88
+        for node in self.nodes:
+            if not node.is_pinned:
+                vx = (node.pos.x() - node.old_pos.x()) * friction
+                vy = (node.pos.y() - node.old_pos.y()) * friction
+                node.old_pos = QPointF(node.pos)
+                node.pos = QPointF(node.pos.x() + vx, node.pos.y() + vy)
+
+        # ----------------------------------------------------
+        # 핵심: 정방향/역방향 대칭 연산 (Symmetric Relaxation)
+        # ----------------------------------------------------
+        iterations = 16
+        for it in range(iterations):
+            # 짝수번째 반복은 정방향, 홀수번째 반복은 역방향 순회
+            line_iterable = self.lines if (it % 2 == 0) else reversed(self.lines)
+
+            for line in line_iterable:
+                nA, nB = line.node_a, line.node_b
                 
-                pos_a = node_a.scenePos()
-                pos_b = node_b.scenePos()
-
-                dx = pos_b.x() - pos_a.x()
-                dy = pos_b.y() - pos_a.y()
+                dx = nB.pos.x() - nA.pos.x()
+                dy = nB.pos.y() - nA.pos.y()
                 dist = math.hypot(dx, dy)
 
                 if dist < 1e-5:
                     continue
 
-                # 목표 길이 대비 길이 오차 계산
-                diff = (dist - line.rest_length) / dist
-                offset_x = dx * 0.5 * diff
-                offset_y = dy * 0.5 * diff
+                delta = (dist - line.rest_length) / dist
+                ox = dx * 0.5 * delta
+                oy = dy * 0.5 * delta
 
-                # 이동중인 노드는 위치를 고정하고, 나머지 노드들의 위치를 분배 조정
-                if node_a == moved_node:
-                    node_b.setPos(pos_b.x() - offset_x * 2, pos_b.y() - offset_y * 2)
-                elif node_b == moved_node:
-                    node_a.setPos(pos_a.x() + offset_x * 2, pos_a.y() + offset_y * 2)
-                else:
-                    node_a.setPos(pos_a.x() + offset_x, pos_a.y() + offset_y)
-                    node_b.setPos(pos_b.x() - offset_x, pos_b.y() - offset_y)
+                if nA.is_pinned and not nB.is_pinned:
+                    nB.pos = QPointF(nB.pos.x() - ox * 2, nB.pos.y() - oy * 2)
+                elif nB.is_pinned and not nA.is_pinned:
+                    nA.pos = QPointF(nA.pos.x() + ox * 2, nA.pos.y() + oy * 2)
+                elif not nA.is_pinned and not nB.is_pinned:
+                    nA.pos = QPointF(nA.pos.x() + ox, nA.pos.y() + oy)
+                    nB.pos = QPointF(nB.pos.x() - ox, nB.pos.y() - oy)
 
-        # 라인 그래픽 업데이트
-        for line in all_lines:
+        for node in self.nodes:
+            node.setPos(node.pos)
+        for line in self.lines:
             line.update_position()
 
 
-# ============================================================
-# Main Execution
-# ============================================================
 def main():
     app = QApplication(sys.argv)
     scene = NodeScene()
 
-    # 사각형 형태의 순환 구조 예시 노드 배치 (1-2-3-4-1)
-    n1 = NodeItem(1, 200, 200)
-    n2 = NodeItem(2, 400, 200)
-    n3 = NodeItem(3, 400, 400)
-    n4 = NodeItem(4, 200, 400)
+    # 사각형 대칭 구조 테스트
+    n1 = scene.add_node(1, 250, 200)
+    n2 = scene.add_node(2, 450, 200)
+    n3 = scene.add_node(3, 450, 400)
+    n4 = scene.add_node(4, 250, 400)
 
-    for n in (n1, n2, n3, n4):
-        scene.addItem(n)
-
-    # 4개 노드를 연결하여 닫힌 사각형 구조(순환 루프) 생성
-    scene.addItem(LineItem(n1, n2))
-    scene.addItem(LineItem(n2, n3))
-    scene.addItem(LineItem(n3, n4))
-    scene.addItem(LineItem(n4, n1))
-
-    # 대각선 서포트 라인을 추가하면 사각형의 형태가 찌그러지지 않고 강체처럼 유지됩니다.
-    # scene.addItem(LineItem(n1, n3)) 
+    scene.add_line(n1, n2)
+    scene.add_line(n2, n3)
+    scene.add_line(n3, n4)
+    scene.add_line(n4, n1)
 
     view = QGraphicsView(scene)
-    view.setWindowTitle("Cyclic Structure Node Constraint")
+    view.setWindowTitle("Symmetric Constraint Physics")
     view.resize(800, 600)
     view.show()
 
