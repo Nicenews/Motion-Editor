@@ -302,6 +302,14 @@ class MainWindow(QMainWindow):
         
         # 테스트 씬 생성 (캐릭터 + 도구)
         self.scene = Scene()
+
+        # 오브젝트 2: 도구 (막대기 형태)
+        tool = GameObject("tool")
+        tool.add_node(1, 450, 400) # 손잡이
+        tool.add_node(2, 550, 400) # 끝단
+        tool.add_line(1, 2)
+        self.scene.add_object(tool)
+
         
         # 오브젝트 1: 캐릭터 (스틱맨 팔 구조)
         char = GameObject("character")
@@ -314,12 +322,7 @@ class MainWindow(QMainWindow):
         char.pose.pinned.add(1) # 어깨 고정
         self.scene.add_object(char)
 
-        # 오브젝트 2: 도구 (막대기 형태)
-        tool = GameObject("tool")
-        tool.add_node(1, 450, 400) # 손잡이
-        tool.add_node(2, 550, 400) # 끝단
-        tool.add_line(1, 2)
-        self.scene.add_object(tool)
+
 
         # 캐릭터 손(character, 3)과 도구 손잡이(tool, 1) 동적 부착(Weld) 설정
         self.scene.attach("character", 3, "tool", 1)

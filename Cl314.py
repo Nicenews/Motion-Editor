@@ -525,6 +525,8 @@ class PoseEditor:
 # ----------------------------------------------------------------------
 def build_demo():
     e = PoseEditor()
+    
+    #'''
     for nid, x, y in [(1, 240, 200), (2, 300, 200), (3, 360, 200), (4, 300, 300), (5, 300, 140)]:
         e.add_node(nid, x, y)
     for a, b in [(1, 2), (2, 3), (2, 4), (2, 5)]:
@@ -532,6 +534,28 @@ def build_demo():
     e.add_rule("R", 1, 2, 3)      # 어깨: 노드 2 중심 점대칭
     e.add_rule("F", 1, 2, 4)      # 왼쪽 어깨-몸통 각도 고정
     e.add_rule("F", 3, 2, 4)      # 오른쪽 어깨-몸통 각도 고정
+    #'''
+    
+    '''
+    e.add_node(1, 100, 100)
+    e.add_node(2, 300, 100)
+    e.add_node(3, 200, 100)
+    e.add_node(4, 200, 200)
+
+    e.add_line(1, 3)
+    e.add_line(3, 2)
+    e.add_line(1, 4)
+    e.add_line(2, 4)
+    e.add_line(3, 4)
+    
+    #e.add_rule("A", 3, 1, 2)
+    '''
+            
+        
+                        
+
+
+    
     return e
 
 

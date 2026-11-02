@@ -509,7 +509,7 @@ def create_test_object() -> Object:
     graph_object.add_line(4, 5)
 
     # 2-3-5-4-2 루프를 만들기 위한 추가 라인
-    graph_object.add_line(3, 5)
+    #graph_object.add_line(3, 5)
 
     # 2-4-5가 일직선으로 팽팽해서 고리가 최대로 펴진 상태이므로, 보강선(3-4)으로 고리를 강체로 만든다.
     if ADD_BRACE:

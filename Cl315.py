@@ -577,6 +577,7 @@ def build_demo():
         e.add_line(a, b)
     e.add_rule("R", 1, 2, 3)      # 어깨: 노드 2 중심 점대칭
     e.add_rule("F", 1, 2, 4)      # 어깨-몸통 각도 고정 (R이 항상 유지되므로 F는 하나면 충분)
+    e.add_rule("F", 5, 2, 4)      # 어깨-몸통 각도 고정 (R이 항상 유지되므로 F는 하나면 충분)
     return e
 
 

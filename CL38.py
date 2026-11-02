@@ -723,6 +723,19 @@ class MainWindow(QMainWindow):
     def create_demo(self):
         ed = self.editor
 
+        ed.add_node(1, 100, 100)
+        ed.add_node(2, 200, 100)
+        ed.add_node(3, 300, 100)
+        ed.add_node(4, 200, 200)
+        ed.add_node(5, 200, 300)
+
+        ed.add_line(1, 2)
+        ed.add_line(2, 3)
+        ed.add_line(2, 4)
+        ed.add_line(4, 5)
+        ed.add_line(3, 5)
+
+        '''
         # 1. 노드 생성
         ed.add_node(1, 200, 200, fixed=True)  # 조작 노드 1 (기본 고정, 더블클릭으로 해제)
         ed.add_node(2, 350, 300)       # 중심 노드 2
@@ -737,6 +750,7 @@ class MainWindow(QMainWindow):
         # 3. Rule 적용
         ed.add_rule('F', 1, 2, 4)
         ed.add_rule('R', 1, 2, 3)
+        '''
 
         ed.update_graphics()
 
