@@ -29,7 +29,7 @@ def dist(p, q):
 
 @dataclass
 class Rule:
-    kind: str
+    kind: str          # 'F', 'R', 'A'
     n1: int
     n2: int
     n3: int
@@ -38,7 +38,7 @@ class Rule:
 class Skeleton:
     def __init__(self):
         self.nodes = []
-        self.max_len = {}
+        self.max_len = {}   # key(a, b) -> float
         self.rules = []
 
 class Pose:
@@ -46,7 +46,7 @@ class Pose:
         self.pos = {}       # local_nid -> [x, y]
         self.cur_len = {}   # key(a, b) -> float
         self.angles = {}    # rule_idx -> float
-        self.pinned = set()
+        self.pinned = set() # local_nid set
 
 class GameObject:
     def __init__(self, obj_id: str):
@@ -82,10 +82,11 @@ class GameObject:
         v3 = (p3[0] - p2[0], p3[1] - p2[1])
         return math.atan2(v1[0] * v3[1] - v1[1] * v3[0], v1[0] * v3[0] + v1[1] * v3[1])
 
+
 class Scene:
     def __init__(self):
         self.objects = {}
-        self.welds = []
+        self.welds = []     # [ ((p_obj, p_node), (c_obj, c_node)), ... ]
 
     def add_object(self, obj: GameObject):
         self.objects[obj.obj_id] = obj
@@ -94,6 +95,9 @@ class Scene:
         w = ((p_obj, p_node), (c_obj, c_node))
         if w not in self.welds:
             self.welds.append(w)
+
+    def detach(self, c_obj):
+        self.welds = [w for w in self.welds if w[1][0] != c_obj]
 
     def solve_unified(self, kinpos=None):
         if kinpos is None:
@@ -107,10 +111,11 @@ class Scene:
                 pos[gkey] = [p[0], p[1]]
                 w[gkey] = 0.0 if nid in obj.pose.pinned else 1.0
 
+        # 드래그 중인 노드는 가중치를 0으로 설정하여 앵커(무한 질량) 역할 수행
         for gkey, p in kinpos.items():
             if gkey in pos:
                 pos[gkey] = [p[0], p[1]]
-                w[gkey] = SOFT
+                w[gkey] = 0.0
 
         n_nodes = len(pos)
         caps = (
@@ -131,7 +136,7 @@ class Scene:
                         if gkey in pos:
                             pos[gkey][0], pos[gkey][1] = p[0], p[1]
 
-                # 오브젝트별 제약
+                # 1. 오브젝트별 개별 제약 투영
                 for obj_id, obj in self.objects.items():
                     for i, r in enumerate(obj.skel.rules):
                         if r.kind == "F" and i in obj.pose.angles:
@@ -141,7 +146,7 @@ class Scene:
                     for (a, b), M in obj.skel.max_len.items():
                         self._proj_max(pos, w, (obj_id, a), (obj_id, b), M)
 
-                # 용접(부착) 제약 투영
+                # 2. 양방향 대칭 용접(부착) 제약 투영
                 for parent_key, child_key in self.welds:
                     self._proj_weld(pos, w, parent_key, child_key)
 
@@ -149,6 +154,7 @@ class Scene:
                     if it >= PULL_MIN and max(abs(pos[k][0] - prev[k][0]) + abs(pos[k][1] - prev[k][1]) for k in pos) < CONV_PULL:
                         break
 
+        # 연산 결과를 GameObject 포즈에 반영
         for gkey, p in pos.items():
             obj_id, nid = gkey
             if obj_id in self.objects and nid in self.objects[obj_id].pose.pos:
@@ -178,13 +184,20 @@ class Scene:
             Scene._proj_eq(pos, w, a_key, b_key, M)
 
     @staticmethod
-    def _proj_weld(pos, w, parent_key, child_key):
-        if parent_key not in pos or child_key not in pos:
+    def _proj_weld(pos, w, a_key, b_key):
+        """양방향 대칭형 용접 제약 (질량 가중치 비율대로 서로 당겨 거리 0 유지)"""
+        if a_key not in pos or b_key not in pos:
             return
-        if w[child_key] <= 0:
+        pa, pb = pos[a_key], pos[b_key]
+        dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+        d = math.hypot(dx, dy)
+        sw = w[a_key] + w[b_key]
+        if sw == 0 or d < EPS:
             return
-        pos[child_key][0] = pos[parent_key][0]
-        pos[child_key][1] = pos[parent_key][1]
+        pa[0] += (w[a_key] / sw) * dx
+        pa[1] += (w[a_key] / sw) * dy
+        pb[0] -= (w[b_key] / sw) * dx
+        pb[1] -= (w[b_key] / sw) * dy
 
     @staticmethod
     def _proj_angle(pos, w, obj_id, r, th):
@@ -216,7 +229,7 @@ class SceneCanvas(QWidget):
         super().__init__()
         self.scene = scene
         self.drag_gkey = None
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(900, 700)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -231,7 +244,7 @@ class SceneCanvas(QWidget):
                 p2 = QPointF(*obj.pose.pos[b])
                 painter.drawLine(p1, p2)
 
-        # 2. 용접(부착)선 렌더링
+        # 2. 용접(부착)선 렌더링 (점선)
         pen_weld = QPen(QColor(255, 69, 0), 2, Qt.PenStyle.DashLine)
         painter.setPen(pen_weld)
         for (p_key, c_key) in self.scene.welds:
@@ -245,21 +258,19 @@ class SceneCanvas(QWidget):
         # 3. 노드 렌더링
         for obj_id, obj in self.scene.objects.items():
             for nid, (x, y) in obj.pose.pos.items():
-                gkey = (obj_id, nid)
                 if nid in obj.pose.pinned:
                     painter.setBrush(QBrush(QColor(220, 20, 60))) # 고정 노드 (빨간색)
                 else:
                     painter.setBrush(QBrush(QColor(255, 255, 255)))
                 
                 painter.setPen(QPen(QColor(0, 0, 0), 2))
-                painter.drawEllipse(QPointF(x, y), 7, 7)
+                painter.drawEllipse(QPointF(x, y), 8, 8)
 
     def mousePressEvent(self, event):
         mx, my = event.position().x(), event.position().y()
         
-        # 노드 피킹 (가장 가까운 노드 선택)
         clicked = None
-        min_dist = 15.0
+        min_dist = 18.0
         for obj_id, obj in self.scene.objects.items():
             for nid, (x, y) in obj.pose.pos.items():
                 d = math.hypot(x - mx, y - my)
@@ -271,7 +282,6 @@ class SceneCanvas(QWidget):
             if event.button() == Qt.MouseButton.LeftButton:
                 self.drag_gkey = clicked
             elif event.button() == Qt.MouseButton.RightButton:
-                # 우클릭 시 고정(Pin) 토글
                 obj_id, nid = clicked
                 pinned = self.scene.objects[obj_id].pose.pinned
                 if nid in pinned:
@@ -298,37 +308,35 @@ class SceneCanvas(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Multi-Object Pose Editor Test (CL-3.15 + Weld)")
+        self.setWindowTitle("Multi-Object Pose Editor (Two-Way Weld & IK)")
         
-        # 테스트 씬 생성 (캐릭터 + 도구)
         self.scene = Scene()
         
-        # 오브젝트 1: 캐릭터 (스틱맨 팔 구조)
+        # 오브젝트 1: 캐릭터 팔 구조
         char = GameObject("character")
-        char.add_node(1, 300, 200) # 어깨
-        char.add_node(2, 300, 300) # 팔꿈치
-        char.add_node(3, 300, 400) # 손
+        char.add_node(1, 350, 200) # 어깨
+        char.add_node(2, 350, 320) # 팔꿈치
+        char.add_node(3, 350, 440) # 손
         char.add_line(1, 2)
         char.add_line(2, 3)
         char.add_rule("F", 1, 2, 3)
-        char.pose.pinned.add(1) # 어깨 고정
+        char.pose.pinned.add(1)    # 어깨 고정
         self.scene.add_object(char)
 
-        # 오브젝트 2: 도구 (막대기 형태)
+        # 오브젝트 2: 도구 (막대기)
         tool = GameObject("tool")
-        tool.add_node(1, 450, 400) # 손잡이
-        tool.add_node(2, 550, 400) # 끝단
+        tool.add_node(1, 500, 440) # 손잡이
+        tool.add_node(2, 620, 440) # 끝단
         tool.add_line(1, 2)
         self.scene.add_object(tool)
 
-        # 캐릭터 손(character, 3)과 도구 손잡이(tool, 1) 동적 부착(Weld) 설정
+        # 캐릭터 손과 도구 손잡이 동적 부착 (Weld)
         self.scene.attach("character", 3, "tool", 1)
 
-        # UI 배치
         self.canvas = SceneCanvas(self.scene)
         
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("좌클릭 드래그: 노드 이동 / 우클릭: 노드 고정(Pin) 토글"))
+        layout.addWidget(QLabel("좌클릭 드래그: 노드 이동 (도구를 끌면 손과 팔이 함께 딸려옴) / 우클릭: 노드 고정(Pin) 토글"))
         layout.addWidget(self.canvas)
         
         container = QWidget()
