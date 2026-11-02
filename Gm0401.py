@@ -5,9 +5,6 @@ from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor, QBrush
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel
 
-# ==========================================
-# 1. 솔버 및 씬 엔진 (Unified Solver & Scene)
-# ==========================================
 TOL = 0.02
 PULL_ITER = 30
 POLISH_ITER = 50
@@ -38,15 +35,15 @@ class Rule:
 class Skeleton:
     def __init__(self):
         self.nodes = []
-        self.max_len = {}   # key(a, b) -> float
+        self.max_len = {}   
         self.rules = []
 
 class Pose:
     def __init__(self):
-        self.pos = {}       # local_nid -> [x, y]
-        self.cur_len = {}   # key(a, b) -> float
-        self.angles = {}    # rule_idx -> float
-        self.pinned = set() # local_nid set
+        self.pos = {}       
+        self.cur_len = {}   
+        self.angles = {}    
+        self.pinned = set() 
 
 class GameObject:
     def __init__(self, obj_id: str):
@@ -86,7 +83,7 @@ class GameObject:
 class Scene:
     def __init__(self):
         self.objects = {}
-        self.welds = []     # [ ((p_obj, p_node), (c_obj, c_node)), ... ]
+        self.welds = []     
 
     def add_object(self, obj: GameObject):
         self.objects[obj.obj_id] = obj
@@ -98,6 +95,13 @@ class Scene:
 
     def detach(self, c_obj):
         self.welds = [w for w in self.welds if w[1][0] != c_obj]
+
+    def update_angles(self):
+        """이동이 끝났을 때 현재 포즈 기준으로 F 규칙의 각도를 새로 계산하여 갱신"""
+        for obj_id, obj in self.objects.items():
+            for i, r in enumerate(obj.skel.rules):
+                if r.kind == "F":
+                    obj.pose.angles[i] = GameObject._angle(obj.pose.pos, r)
 
     def solve_unified(self, kinpos=None):
         if kinpos is None:
@@ -111,7 +115,6 @@ class Scene:
                 pos[gkey] = [p[0], p[1]]
                 w[gkey] = 0.0 if nid in obj.pose.pinned else 1.0
 
-        # 드래그 중인 노드는 가중치를 0으로 설정하여 앵커(무한 질량) 역할 수행
         for gkey, p in kinpos.items():
             if gkey in pos:
                 pos[gkey] = [p[0], p[1]]
@@ -136,7 +139,6 @@ class Scene:
                         if gkey in pos:
                             pos[gkey][0], pos[gkey][1] = p[0], p[1]
 
-                # 1. 오브젝트별 개별 제약 투영
                 for obj_id, obj in self.objects.items():
                     for i, r in enumerate(obj.skel.rules):
                         if r.kind == "F" and i in obj.pose.angles:
@@ -146,7 +148,6 @@ class Scene:
                     for (a, b), M in obj.skel.max_len.items():
                         self._proj_max(pos, w, (obj_id, a), (obj_id, b), M)
 
-                # 2. 양방향 대칭 용접(부착) 제약 투영
                 for parent_key, child_key in self.welds:
                     self._proj_weld(pos, w, parent_key, child_key)
 
@@ -154,7 +155,6 @@ class Scene:
                     if it >= PULL_MIN and max(abs(pos[k][0] - prev[k][0]) + abs(pos[k][1] - prev[k][1]) for k in pos) < CONV_PULL:
                         break
 
-        # 연산 결과를 GameObject 포즈에 반영
         for gkey, p in pos.items():
             obj_id, nid = gkey
             if obj_id in self.objects and nid in self.objects[obj_id].pose.pos:
@@ -185,7 +185,6 @@ class Scene:
 
     @staticmethod
     def _proj_weld(pos, w, a_key, b_key):
-        """양방향 대칭형 용접 제약 (질량 가중치 비율대로 서로 당겨 거리 0 유지)"""
         if a_key not in pos or b_key not in pos:
             return
         pa, pb = pos[a_key], pos[b_key]
@@ -221,9 +220,6 @@ class Scene:
         p1[0], p1[1] = p2[0] + r1[0], p2[1] + r1[1]
 
 
-# ==========================================
-# 2. PyQt6 Canvas UI 및 상호작용
-# ==========================================
 class SceneCanvas(QWidget):
     def __init__(self, scene: Scene):
         super().__init__()
@@ -235,7 +231,6 @@ class SceneCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 1. 링크 렌더링
         pen_line = QPen(QColor(70, 130, 180), 4)
         painter.setPen(pen_line)
         for obj_id, obj in self.scene.objects.items():
@@ -244,7 +239,6 @@ class SceneCanvas(QWidget):
                 p2 = QPointF(*obj.pose.pos[b])
                 painter.drawLine(p1, p2)
 
-        # 2. 용접(부착)선 렌더링 (점선)
         pen_weld = QPen(QColor(255, 69, 0), 2, Qt.PenStyle.DashLine)
         painter.setPen(pen_weld)
         for (p_key, c_key) in self.scene.welds:
@@ -255,11 +249,10 @@ class SceneCanvas(QWidget):
                 pt2 = QPointF(*self.scene.objects[c_obj].pose.pos[c_nid])
                 painter.drawLine(pt1, pt2)
 
-        # 3. 노드 렌더링
         for obj_id, obj in self.scene.objects.items():
             for nid, (x, y) in obj.pose.pos.items():
                 if nid in obj.pose.pinned:
-                    painter.setBrush(QBrush(QColor(220, 20, 60))) # 고정 노드 (빨간색)
+                    painter.setBrush(QBrush(QColor(220, 20, 60))) 
                 else:
                     painter.setBrush(QBrush(QColor(255, 255, 255)))
                 
@@ -300,43 +293,40 @@ class SceneCanvas(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_gkey = None
+            # 이동(드래그)이 끝나는 시점에 F 규칙의 각도를 현재 포즈 기준으로 재계산하여 갱신
+            self.scene.update_angles()
+            self.update()
 
 
-# ==========================================
-# 3. 메인 윈도우 및 테스트 씬 구성
-# ==========================================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Multi-Object Pose Editor (Two-Way Weld & IK)")
+        self.setWindowTitle("Multi-Object Pose Editor (Dynamic F-Angle Update)")
         
         self.scene = Scene()
         
-        # 오브젝트 1: 캐릭터 팔 구조
         char = GameObject("character")
-        char.add_node(1, 350, 200) # 어깨
+        char.add_node(1, 350, 200) # 어깨 (우클릭으로 고정/해제 토글 가능)
         char.add_node(2, 350, 320) # 팔꿈치
         char.add_node(3, 350, 440) # 손
         char.add_line(1, 2)
         char.add_line(2, 3)
         char.add_rule("F", 1, 2, 3)
-        char.pose.pinned.add(1)    # 어깨 고정
+        # char.pose.pinned.add(1) # 필요시 1번 노드 고정 해제하여 자유롭게 이동 가능
         self.scene.add_object(char)
 
-        # 오브젝트 2: 도구 (막대기)
         tool = GameObject("tool")
-        tool.add_node(1, 500, 440) # 손잡이
-        tool.add_node(2, 620, 440) # 끝단
+        tool.add_node(1, 500, 440) 
+        tool.add_node(2, 620, 440) 
         tool.add_line(1, 2)
         self.scene.add_object(tool)
 
-        # 캐릭터 손과 도구 손잡이 동적 부착 (Weld)
         self.scene.attach("character", 3, "tool", 1)
 
         self.canvas = SceneCanvas(self.scene)
         
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("좌클릭 드래그: 노드 이동 (도구를 끌면 손과 팔이 함께 딸려옴) / 우클릭: 노드 고정(Pin) 토글"))
+        layout.addWidget(QLabel("좌클릭 드래그: 이동 후 마우스를 떼면 현재 각도가 F 규칙에 새롭게 저장됨 / 우클릭: 노드 고정(Pin) 토글"))
         layout.addWidget(self.canvas)
         
         container = QWidget()
