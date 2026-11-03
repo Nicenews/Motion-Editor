@@ -202,7 +202,7 @@ class StickmanCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # 1. 링크 렌더링
-        pen_line = QPen(QColor(50, 50, 50), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundJoin, Qt.PenJoinStyle.RoundJoin)
+        pen_line = QPen(QColor(50, 50, 50), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen_line)
         for p_key, c_key in self.model.lines:
             pt1 = QPointF(*self.model.joints[p_key])

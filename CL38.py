@@ -723,6 +723,55 @@ class MainWindow(QMainWindow):
     def create_demo(self):
         ed = self.editor
 
+
+        ed.add_node(1, 200, 100)
+        ed.add_node(2, 200, 130)
+        ed.add_node(3, 200, 230)
+
+        ed.add_node(4, 170, 130)
+        ed.add_node(5, 160, 180)
+        ed.add_node(6, 150, 230)
+
+        ed.add_node(7, 230, 130)
+        ed.add_node(8, 240, 180)
+        ed.add_node(9, 250, 230)
+
+        ed.add_node(14, 180, 310)
+        ed.add_node(15, 160, 390)
+        ed.add_node(16, 140, 390)
+
+        ed.add_node(17, 220, 310)
+        ed.add_node(18, 240, 390)
+        ed.add_node(19, 260, 390)
+
+        ed.add_line(1, 2); 
+        ed.add_line(2, 3); 
+
+        ed.add_line(2, 4); 
+        ed.add_line(4, 5); 
+        ed.add_line(5, 6); 
+
+        ed.add_line(2, 7); 
+        ed.add_line(7, 8); 
+        ed.add_line(8, 9); 
+
+        ed.add_line(3, 14); 
+        ed.add_line(14, 15); 
+        ed.add_line(15, 16); 
+
+        ed.add_line(3, 17); 
+        ed.add_line(17, 18); 
+        ed.add_line(18, 19); 
+
+        ed.add_rule("F", 1, 2, 3)  
+        ed.add_rule("R", 4, 2, 7)  
+        ed.add_rule("F", 4, 2, 3)  
+
+        ed.add_rule("F", 16, 15, 14)  
+        ed.add_rule("F", 19, 18, 17)  
+
+
+        '''
         ed.add_node(1, 100, 100)
         ed.add_node(2, 200, 100)
         ed.add_node(3, 300, 100)
@@ -734,6 +783,10 @@ class MainWindow(QMainWindow):
         ed.add_line(2, 4)
         ed.add_line(4, 5)
         ed.add_line(3, 5)
+
+        ed.add_rule('F', 1, 2, 3)
+        '''
+
 
         '''
         # 1. 노드 생성

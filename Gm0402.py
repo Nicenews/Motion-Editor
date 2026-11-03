@@ -311,7 +311,7 @@ class MainWindow(QMainWindow):
         char.add_node(3, 350, 440) # 손
         char.add_line(1, 2)
         char.add_line(2, 3)
-        char.add_rule("F", 1, 2, 3)
+        char.add_rule("F", 3, 2, 1)
         # char.pose.pinned.add(1) # 필요시 1번 노드 고정 해제하여 자유롭게 이동 가능
         self.scene.add_object(char)
 
